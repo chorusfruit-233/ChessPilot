@@ -9,7 +9,7 @@ import de.robv.android.xposed.XposedHelpers
  * Draws the Stockfish best-move arrow **natively inside Duolingo's own Rive board** by
  * calling the same method the app's CheckmateHelper hint system uses:
  *
- *     cl5.s(from: Square, to: Square, animate: Boolean, type: ArrowType, mode: Int, color: ArrowColor)
+ *     mz6.e0(from: Square, to: Square, animate: Boolean, type: ArrowType, mode: Int, color: ArrowColor)
  *
  * This is resolved dynamically: we look for a 6-arg method on the controller whose 3rd
  * arg is boolean and whose 4th/6th args are the ArrowType/ArrowColor enums. Zero overlay
@@ -251,10 +251,9 @@ class ArrowPainter(private val remap: Remap) {
                 noteDrawFailure(colorName)
                 return
             }
-            // Mirror Duolingo's own game-review flow (hq4.n): reset arrows first, then draw.
+            // Reset arrows first, then draw through the app's own Rive event channel.
             clearNow(controller)
-            // s(from, to, animate=false, SOLID, mode=0, color) — CONFIRMED against hq4.j
-            // and against the live 6.85.7 signature seen in the LSPosed log.
+            // Same call convention in 6.85.7 (cl5.s) and 6.105.2 (mz6.e0).
             m.invoke(controller, fromSq, toSq, false, solid, 0, color)
             // Ack only real bestmoves: a prediction ack would masquerade as a
             // confirmed recommendation in the companion's event log. A
@@ -280,7 +279,7 @@ class ArrowPainter(private val remap: Remap) {
         }
     }
 
-    /** Reset arrows — mirrors the app's own `cl5.r()` call before drawing (see hq4.n). */
+    /** Reset arrows using this APK's mapped ResetArrows dispatcher. */
     fun clear() {
         BridgePublisher.bestConfirmedFen = null
         BridgePublisher.bestConfirmedMove = null
@@ -301,8 +300,10 @@ class ArrowPainter(private val remap: Remap) {
     private fun clearNow(controller: Any) {
         var m = clearMethod
         if (m == null || clearMethodFor !== controller.javaClass) {
-            m = controller.javaClass.methods
-                .firstOrNull { it.name == "r" && it.parameterCount == 0 }
+            val names = remap.methodNames("clearArrows")
+            m = controller.javaClass.declaredMethods.firstOrNull {
+                it.name in names && it.parameterCount == 0 && it.returnType == Void.TYPE
+            }?.apply { isAccessible = true }
             clearMethod = m
             clearMethodFor = controller.javaClass
         }

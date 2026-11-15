@@ -1,4 +1,72 @@
-# Duolingo Chess — Reverse-Engineering Map (v6.85.7)
+# Duolingo Chess — Reverse-Engineering Map (v6.105.2)
+
+## Current APK: 6.105.2 / versionCode 2497
+
+Source: the fork's draft release asset `_6.105.2.apks` (base + arm64_v8a +
+xxxhdpi). Bundle SHA-256:
+`cfd396e2b50c91ac050bfe3e9e37bd88632171936f84f96be545f2dca39e7c51`.
+The following interfaces were checked against its DEX definitions. This is static
+verification plus a module build, not a device/LSPosed gameplay test.
+
+| Role | 6.105.2 class | Evidence |
+|---|---|---|
+| Game state | `ox5` | `ChessGameState(fen=` |
+| FEN | `dm5` | `ChessFen(piecePlacementString=` |
+| Board | `x05` | `ChessBoardState(board=` |
+| Square | `h55` | `ChessCoordinate(row=`, constructor `(int row, int col)` |
+| Move | `gf6` | `ChessMove(from=`, `b()` returns UCI |
+| Piece | `eh6` | third parameter of the ShowArrow constructor |
+| Setup | `nx5` | `ChessGameSetupModel(fenNotation=` |
+| Controller | `mz6` | state getters + exact six-argument arrow method |
+| Rive point | `vbz` | `RiveCoordinate(x=` |
+| Arrow coordinates | `d9z` | `RiveArrowCoordinates(start=` |
+| Arrow event | `jaz` | `ShowArrow(arrowType=` |
+| Hide-moves event | `u9z` | `HideValidMoves(gameState=`; historical key `boardUpdateEvent` |
+| Resync | `cr6` | `ResyncGameState(fen=` |
+
+`ox5.a/d/e/f` still hold FEN / user color / current player / move history.
+`dm5.a..i` still hold placement, active color, four castling rights, en passant,
+halfmove clock and fullmove number; `dm5.b()` assembles the full FEN. Thus
+`StateBridge` can retain its field accessors. `gf6.b()` remains the UCI getter.
+The generator now validates these field types and method signatures before
+writing a table, so a future layout change requires a runtime update as well.
+
+The controller changed more substantially:
+
+```kotlin
+mz6.I(): ox5  // displayed state, including move-history navigation
+mz6.J(): ox5  // live state, read from the game use case's StateFlow
+mz6.e0(from: h55, to: h55, animate: Boolean, type: ArrowType, mode: Int, color: ArrowColor)
+mz6.c0()      // dispatches the ResetArrows singleton aaz.a via F(...)
+mz6.H(row: Int, col: Int): h55  // 1-based; white subtracts 1, black uses 8-index
+```
+
+`MainHook` already discovers all zero-argument state getters by return type, and
+`ArrowPainter` already discovers the exact draw signature. Arrow clearing must
+use the generated `methods.clearArrows` mapping: the old hard-coded `r()` is now
+an unrelated four-argument method. Arrow generation still rotates both square
+indices by `7-index` for Black; automatic taps retain the same orientation.
+The controller no longer owns the Rive View directly; constructor hooks on the
+kept `app.rive.runtime.kotlin.RiveAnimationView` remain the view discovery path.
+
+Regenerate and verify with the same bundle:
+
+```sh
+python -m pip install androguard==3.3.5
+python tools/remap.py --apk /path/to/_6.105.2.apks
+python tools/remap.py --apk /path/to/_6.105.2.apks --check
+python -m unittest discover -s tools -v
+sh gradlew.sh :module:assembleDebug :module:assembleRelease :module:lintRelease
+```
+
+The old script counted Androguard's descriptor spaces as parameter types, so it
+missed the controller/square signature, and passed `BytesIO` to `APK` without
+`raw=True`, so version extraction failed. Both are fixed. Unresolved or ambiguous
+interfaces now stop generation before writing; stale R8 names are not retained.
+The wrapper now uses Gradle's standalone wrapper JAR and a checksum-pinned 8.7
+distribution instead of an incomplete outer JAR and machine-specific Windows paths.
+
+## Historical device findings: 6.85.7
 
 All findings below were extracted from the provided APK (`多邻国_6.85.7.apks` → `base.apk`,
 `split_config.arm64_v8a.apk`) by mining dex strings and running Androguard over

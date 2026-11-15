@@ -1,7 +1,9 @@
 # 使用说明（中文）
 
-面向多邻国 6.85.7 / arm64。两个包：`dist/app-release-test.apk`（伴侣 App：引擎+服务+状态页），
+当前适配多邻国 6.105.2（versionCode 2497）/ arm64，已通过 APK 静态接口核验和模块构建，尚待真机验证。两个包：`dist/app-release-test.apk`（伴侣 App：引擎+服务+状态页），
 `dist/module-release-test.apk`（LSPosed 模块：读棋盘局面、画箭头）。
+
+本次只需更新模块，原有伴侣 App 可继续使用。升级模块后需杀掉多邻国进程重开；旧版 6.85.7 的映射不适用于当前模块。
 
 > 英文技术文档见 `README.md` / `docs/REVERSE_ENGINEERING.md`。注意 README 里早期的
 > ContentProvider 轮询桥已废弃，当前是回环 TCP 桥（见下文“架构”）。
@@ -127,8 +129,8 @@
 
 ```
 多邻国进程（LSPosed）                    伴侣进程
-wq4/qh4 构造 + cl5.g() ──► StateBridge ──► FEN ──► BridgeClient ──Socket──► BridgeServer ──► EngineLoop ──► Stockfish
-cl5.s() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove ◄── EngineLoop ◄── libstockfish.so（NNUE 内嵌）
+ox5/dm5 构造 + mz6.I()/J() ──► StateBridge ──► FEN ──► BridgeClient ──Socket──► BridgeServer ──► EngineLoop ──► Stockfish
+mz6.e0() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove ◄── EngineLoop ◄── libstockfish.so（NNUE 内嵌）
 ```
 
 - **传输**：`127.0.0.1:41717` JSON 行协议。Provider 桥已废弃（多邻国看不见我们的 authority），
@@ -136,7 +138,7 @@ cl5.s() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
 - **类名映射**：`module/src/main/assets/remap.json` 在**编译期烘进** `RemapTable`
   （`generateRemapTable` 任务）。运行时零 IO——assets 走 ClassLoader 读不到，
   `createPackageContext` 从多邻国调必抛 `NameNotFoundException`（包可见性），两条都已验证走不通。
-- **绘制**：所有 `cl5.s()/r()` 调用都在宿主主线程（子线程碰 Rive 必 SIGSEGV，有 tombstone 为证，
+- **绘制**：所有箭头绘制/清理调用都在宿主主线程（6.105.2 为 `mz6.e0()/c0()`；旧版子线程碰 Rive 必 SIGSEGV，有 tombstone 为证，
   崩溃线程名即 `duo-chess-bridg`）。
 - **走棋点按**：Rive 棋盘 View 靠构造直钩发现（`app.rive.runtime.kotlin.RiveAnimationView`，
   dex 实锤），按“大且方、已布局、已显示”打分多选一；`dispatchTouchEvent` 吃的是 View
@@ -178,10 +180,11 @@ cl5.s() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
 
 ## 五、多邻国升级怎么办
 
-1. `python tools/remap.py --apk <新包>.apk`（需 `pip install androguard==3.3.5`），重写
-   `module/src/main/assets/remap.json`。
+1. `python tools/remap.py --apk <新包>.apk`（也支持 `.apks`/`.apkm`，需 `pip install androguard==3.3.5`），重写
+   `module/src/main/assets/remap.json`，同时更新类名、箭头清理方法和包版本。脚本会核对运行时仍使用的字段/方法；缺失或歧义会报错并保留原文件，不沿用旧混淆名。
+   `python tools/remap.py --apk <同一安装包> --check` 可只校验、不写入。
 2. 重编模块（`generateRemapTable` 会自动烘进去）→ 签名 → 安装 → 杀掉多邻国重开。
-3. 看 LSPosed 日志：`remap table v<新版>` + `hooked ChessGameState` 即成；
+3. 看 LSPosed 日志：`remap table v<新版>` + `hooked ChessGameState`，再确认局面上报、箭头清理和黑白两方走棋方向；
    若出现 `!! ChessGameState not found` 就是映射没对上。
 
 ## 五点五、远程算力（电脑下棋，手机看戏）

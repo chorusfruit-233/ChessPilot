@@ -52,6 +52,12 @@ class Remap private constructor(private var map: JSONObject) {
 
     fun resolveClassOrNull(loader: ClassLoader, key: String): Class<*>? = resolveClass(loader, key)
 
+    /** Method names also change between builds (e.g. reset arrows: r -> c0). */
+    fun methodNames(key: String): List<String> {
+        val names = map.optJSONObject("methods")?.optJSONArray(key) ?: return emptyList()
+        return (0 until names.length()).mapNotNull { names.optString(it).takeIf(String::isNotEmpty) }
+    }
+
     companion object {
         /**
          * Primary load path: the compile-time-baked table (always in sync with
