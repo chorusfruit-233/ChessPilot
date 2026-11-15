@@ -19,7 +19,7 @@ gradle-wrapper.zip
 dist/
 # PC backend runtime droppings (self-downloaded engine + pycache)
 pc/engine/
-pc/__pycache__/
+__pycache__/
 # Local tooling state / session journals (never publish)
 .freebuff/
 .workbuddy/

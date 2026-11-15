@@ -39,29 +39,34 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 ## 🚀 快速上手（3 分钟）
 
-前提：手机已 root 并装好 **LSPosed（Zygisk）**。实测通过的多邻国版本是 `6.85.7`（arm64），详见下方「测试环境」。
+前提：手机已 root 并装好 **LSPosed（Zygisk）**。当前模块适配多邻国 `6.105.2`（arm64），已核对 APK 接口并通过构建，尚待真机验证；`6.85.7` 是旧版模块的实测基准，详见下方「适配环境」。
 
 1. 到 [Releases](https://github.com/a1175815821/ChessPilot/releases) 下载并安装两个包：
    `module-release-test.apk`（LSPosed 模块）＋ `app-release-test.apk`（伴侣 App）
 2. LSPosed 里启用模块，作用域勾选**多邻国**，重启手机
 3. 打开伴侣 App，点一次「启动引擎服务」（通知权限给一下）→ 进多邻国开一局，金色箭头就出现了
 
+适配 `6.105.2` 时，模块须使用本适配分支的构建（见「自己构建」）；上游旧版 `0.5` 发布包仍使用 `6.85.7` 映射。伴侣 App 可以沿用。覆盖安装模块须沿用原签名密钥。
+
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
-## 🧪 测试环境
+## 🧪 适配环境
 
-Hook 依赖多邻国内部的混淆名，`remap.json` 是针对某一个具体构建生成的；表里每条都存了多个候选名、按顺序尝试，未混淆的名字也放行，所以换个版本未必就失效。但**实打实验证过的只有下面这一组**，遇到问题时以它为准：
+Hook 依赖多邻国内部的混淆名，`remap.json` 针对下面的具体构建生成，包含类名及箭头清理方法名。当前映射已与安装包的类定义、方法签名和局面字段布局核对，模块通过构建；原生箭头显示和自动走棋仍需在 LSPosed 真机上验证。
 
 | 项 | 值 |
 |---|---|
 | 应用 | 多邻国 `com.duolingo` |
-| 版本 | **6.85.7**（`versionCode 2396`） |
-| 架构 | arm64-v8a（`.apks` 含 3 个 split：base / arm64_v8a / xxhdpi） |
-| 测试用安装包 | `多邻国_6.85.7.apks`，SHA-256 `e282dc8ee71deaa8ac007f9d713b63f23bd732bee2f92c980f1aada8a47963ba` |
-| 映射表基准 | `module/src/main/assets/remap.json` → `"appVersion": "6.85.7"` |
+| 版本 | **6.105.2**（`versionCode 2497`） |
+| 架构 | arm64-v8a（`.apks` 含 3 个 split：base / arm64_v8a / xxxhdpi） |
+| 适配用安装包 | 草稿 release 的 `_6.105.2.apks`，SHA-256 `cfd396e2b50c91ac050bfe3e9e37bd88632171936f84f96be545f2dca39e7c51` |
+| 映射表基准 | `module/src/main/assets/remap.json` → `"appVersion": "6.105.2"` |
+| 验证范围 | APK 静态接口核验、重映射回归测试、模块构建；未进行真机验证 |
 
-> **为什么仓库里没有这个安装包**：它是多邻国的版权作品，公开分发属于侵权；且该 `.apks` 有 108 MB，超过 GitHub 单文件 100 MB 的硬限制，推上去会被直接拒绝。
-> 想复现同一环境，装 **6.85.7** 即可；提 issue 时带上你自己的版本号，方便判断是不是版本差异。
+旧版 `6.85.7`（`versionCode 2396`）的真机记录保留在逆向笔记中。当前映射只包含 `6.105.2` 的已确认名称；旧的短混淆名在新版可能对应其他类，不能直接作为跨版本候选。
+
+> **为什么源码仓库里没有这个安装包**：它是多邻国的版权作品，公开分发属于侵权；且该 `.apks` 约 132 MiB，超过 GitHub 单文件 100 MB 的硬限制，推上去会被直接拒绝。
+> 想复现当前适配环境，装 **6.105.2**；提 issue 时带上版本号和 LSPosed 日志，方便判断是不是版本差异。
 
 ## 🖥️ 想更强？连电脑算力（可选）
 
@@ -99,11 +104,13 @@ Hook 依赖多邻国内部的混淆名，`remap.json` 是针对某一个具体�
 # 1. 取 Stockfish 源码（SF19，网名即哈希验货）
 tools/fetch_stockfish.sh
 
-# 2. 离线构建（仓库自带 gradle-8.7，JDK 17，需 ANDROID_HOME 指向 SDK）
-.gradle-dist\gradle-8.7\bin\gradle.bat -p . :app:assembleRelease :module:assembleRelease --offline
+# 2. 构建（Gradle Wrapper 8.7，JDK 17+，ANDROID_HOME 指向 SDK，首次需联网）
+java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain :app:assembleRelease :module:assembleRelease
 
 # 3. 本地 debug.keystore 签名 → dist/
 ```
+
+Linux/macOS 可用 `sh gradlew.sh :module:assembleDebug` 构建模块（JDK 17+、Android SDK 34；首次构建需联网）。此适配不修改伴侣 App 或桥接协议，可以继续使用原有伴侣 App。
 
 多邻国升级导致混淆名变了？不用慌：`tools/remap.py` 可以从新 APK 再生映射表，流程见逆向笔记。
 
