@@ -1,5 +1,8 @@
 package io.github.a1175815821.chesspilot
 
+import java.util.UUID
+import java.util.WeakHashMap
+
 /**
  * Reads the live chess position out of (obfuscated) model instances and publishes it as
  * a normalized position snapshot to the companion app via the loopback TCP bridge.
@@ -10,8 +13,14 @@ package io.github.a1175815821.chesspilot
  */
 class StateBridge {
 
-    @Volatile var lastFen: String? = null
-        private set
+    private data class Board(val id: String = UUID.randomUUID().toString(), val fen: String? = null, val end: GameEnd? = null)
+    @Volatile private var board = Board()
+    val lastFen: String? get() = board.fen
+    val gameId: String get() = board.id
+    private var controller: Any? = null
+    private var setup: Any? = null
+    private var miniMatchId: String? = null
+    private val retiredControllers = WeakHashMap<Any, Unit>()
 
     @Volatile var lastUserColor: String? = null   // "w" | "b"
         private set
@@ -27,31 +36,87 @@ class StateBridge {
 
     private val lock = Any()
 
-    companion object {
-        /** Exact initial position: a new game/lesson always (re)starts here. */
-        private const val STARTPOS =
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    /** A recreated board or an explicit mini match start starts a new game. */
+    fun onBoardSetup(owner: Any, matchId: String? = null): Boolean = synchronized(lock) {
+        if (retiredControllers.containsKey(owner)) return@synchronized false
+        if (controller === owner && (matchId == null || matchId == miniMatchId)) {
+            return@synchronized true // An in-game resync can reuse this controller.
+        }
+        if (controller !== owner) controller?.let { retiredControllers[it] = Unit }
+        controller = owner
+        miniMatchId = matchId
+        setup = null
+        board = Board()
+        lastUserColor = null
+        lastTurnColor = null
+        lastMoves = emptyList()
+        lastRenderProcessAt = 0
+        BridgeAccess.lastState = null
+        BridgeAccess.lastUserColor = null
+        BridgeAccess.boardController = owner
+        CommandLoop.cancelPendingMove()
+        BridgePublisher.resetPosition()
+        publishSnapshot()
+        true
+    }
+
+    fun canPlay(game: String?, fen: String): Boolean {
+        val current = board
+        return current.id == game && current.fen == fen && current.end == null
+    }
+
+    /** Order bridge commands against end/setup events before scheduling UI work. */
+    fun onPlayableBoard(game: String?, fen: String, action: () -> Unit) = synchronized(lock) {
+        if (canPlay(game, fen)) action()
+    }
+
+    fun onGameEnd(owner: Any?, end: GameEnd, onlyIfPlaying: Boolean = false) = synchronized(lock) {
+        if (owner != null && owner === controller && (!onlyIfPlaying || board.end == null)) finishGame(end)
+    }
+
+    /** Engine fallback for boards that reach a terminal FEN without a match event. */
+    fun onEngineGameEnd(game: String?, fen: String, end: GameEnd) = synchronized(lock) {
+        if (board.id == game && board.fen == fen) finishGame(end)
+    }
+
+    private fun finishGame(end: GameEnd) {
+        val previous = board.end
+        val result = previous?.followedBy(end) ?: end
+        if (result == previous) return
+        board = board.copy(end = result)
+        if (previous == null) {
+            CommandLoop.cancelPendingMove()
+            BridgePublisher.resetPosition()
+            CommandLoop.clearArrowsAfterGame()
+        }
+        publishSnapshot()
+        MainHook.log("game ended: ${result.reason} outcome=${result.outcome ?: "-"}")
+    }
+
+    private fun publishSnapshot() {
+        BridgePublisher.publishSnapshot(board.fen, lastUserColor, lastTurnColor, lastMoves, board.id, board.end)
     }
 
     /** Called from the ChessGameState constructor hook. */
-    fun onGameState(state: Any, src: String = "ctor") {
-        BridgeAccess.lastState = state
+    fun onGameState(state: Any, src: String = "ctor") = synchronized(lock) {
+        if (board.end != null && src != "render") return@synchronized
         BridgePublisher.noteTrigger(src)
         try {
-            val fen = extractFen(state) ?: return
+            val stateSetup = Reflect.getObjectField(state, "c")
+            if (src != "render" && setup != null && setup !== stateSetup) return@synchronized
+            val fen = extractFen(state) ?: return@synchronized
             val user = extractColor(state, "d")   // d = userColor
             val turn = extractColor(state, "e")   // e = turnColor
             val moves = extractMoves(state)       // f = List<Move>
-            resetIfNewGame(fen)
-            synchronized(lock) {
-                lastFen = fen
-                lastUserColor = user ?: lastUserColor
-                lastTurnColor = turn
-                lastMoves = moves
-                lastUpdateAt = System.currentTimeMillis()
-            }
+            if (src == "render") setup = stateSetup
+            BridgeAccess.lastState = state
+            board = board.copy(fen = fen)
+            lastUserColor = user ?: lastUserColor
+            lastTurnColor = turn
+            lastMoves = moves
+            lastUpdateAt = System.currentTimeMillis()
             if (user != null) BridgeAccess.lastUserColor = user
-            BridgePublisher.publishSnapshot(fen, user, turn, moves)
+            publishSnapshot()
         } catch (t: Throwable) {
             MainHook.log("onGameState failed: $t")
         }
@@ -59,6 +124,12 @@ class StateBridge {
 
     /** Flatten fallback state into bootstrap-owned values, never module data classes. */
     fun saveForReload(saved: MutableMap<String, Any>) = synchronized(lock) {
+        saved["game"] = board.id
+        board.end?.let {
+            saved["end"] = it.reason
+            it.outcome?.let { outcome -> saved["outcome"] = outcome }
+        }
+        miniMatchId?.let { saved["miniMatchId"] = it }
         lastFen?.let { saved["fen"] = it }
         lastUserColor?.let { saved["user"] = it }
         lastTurnColor?.let { saved["turn"] = it }
@@ -66,32 +137,30 @@ class StateBridge {
     }
 
     /** FEN-only courses may have no retained game-state object to re-extract. */
-    fun restoreAfterReload(saved: Map<*, *>) {
-        val fen = saved["fen"] as? String ?: return
-        synchronized(lock) {
-            lastFen = fen
-            lastUserColor = saved["user"] as? String
-            lastTurnColor = saved["turn"] as? String
-            lastMoves = (saved["moves"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-            lastUpdateAt = System.currentTimeMillis()
-        }
+    fun restoreAfterReload(saved: Map<*, *>, owner: Any?) = synchronized(lock) {
+        controller = owner
+        miniMatchId = saved["miniMatchId"] as? String
+        val end = (saved["end"] as? String)?.let { GameEnd(it, saved["outcome"] as? String) }
+        board = Board(saved["game"] as? String ?: board.id, saved["fen"] as? String, end)
+        lastUserColor = saved["user"] as? String
+        lastTurnColor = saved["turn"] as? String
+        lastMoves = (saved["moves"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+        lastUpdateAt = System.currentTimeMillis()
         BridgeAccess.lastUserColor = lastUserColor
-        BridgePublisher.publishSnapshot(fen, lastUserColor, lastTurnColor, lastMoves)
+        publishSnapshot()
     }
 
     /** Called from the ChessFen constructor hook (secondary path). */
-    fun onFen(fenObj: Any, loader: ClassLoader) {
+    fun onFen(fenObj: Any) = synchronized(lock) {
+        if (board.end != null) return@synchronized
         BridgePublisher.noteTrigger("fen")
         try {
-            val fen = extractFenFrom(fenObj) ?: return
-            resetIfNewGame(fen)
+            val fen = extractFenFrom(fenObj) ?: return@synchronized
             val turn = fen.split(" ").getOrNull(1)?.lowercase()
-            synchronized(lock) {
-                lastFen = fen
-                lastTurnColor = turn
-                lastUpdateAt = System.currentTimeMillis()
-            }
-            BridgePublisher.publishSnapshot(fen, lastUserColor, lastTurnColor, lastMoves)
+            board = board.copy(fen = fen)
+            lastTurnColor = turn
+            lastUpdateAt = System.currentTimeMillis()
+            publishSnapshot()
         } catch (t: Throwable) {
             MainHook.log("onFen failed: $t")
         }
@@ -122,44 +191,28 @@ class StateBridge {
     @Volatile private var lastRenderProcessAt: Long = 0
 
     /** Called when the Rive controller has rendered the state (g() hook). */
-    fun onRenderedState(state: Any) {
-        BridgeAccess.lastState = state
+    fun onRenderedState(owner: Any, state: Any): Boolean = synchronized(lock) {
+        if (controller == null && !onBoardSetup(owner)) return@synchronized false
+        if (controller !== owner) return@synchronized false
         // Render polling can fire dozens of times per second on the UI thread, each
         // doing full reflection extraction. Throttle the heavy part: states change
         // far slower than frames (ctor path is unthrottled and covers new states).
         val now = System.currentTimeMillis()
-        if (now - lastRenderProcessAt < 200) return
+        if (now - lastRenderProcessAt < 200) return@synchronized board.end == null
         lastRenderProcessAt = now
         onGameState(state, "render") // re-publish: rendered state is authoritative for the UI
+        board.end == null
     }
 
     /** Called by ViewModelFallback when a FEN-shaped string is mined from kept-name classes. */
-    fun acceptExternalFen(fen: String) {
+    fun acceptExternalFen(fen: String) = synchronized(lock) {
+        if (board.end != null || fen == lastFen) return@synchronized
         BridgePublisher.noteTrigger("fb")
-        resetIfNewGame(fen)
-        synchronized(lock) {
-            if (fen == lastFen) return
-            lastFen = fen
-            lastTurnColor = fen.split(" ").getOrNull(1)?.lowercase()
-            lastUpdateAt = System.currentTimeMillis()
-        }
-        BridgePublisher.publishSnapshot(fen, lastUserColor, lastTurnColor, lastMoves)
+        board = board.copy(fen = fen)
+        lastTurnColor = fen.split(" ").getOrNull(1)?.lowercase()
+        lastUpdateAt = System.currentTimeMillis()
+        publishSnapshot()
         MainHook.log("fen(fallback): $fen")
-    }
-
-    /**
-     * Fresh board: forget the previous game (its userColor would invert this
-     * game, and its identical startpos FEN would be change-deduped away).
-     * Runs on ALL entry paths — the primary onGameState hook as well as the
-     * onFen/acceptExternalFen fallbacks, which fire alone when the state
-     * class gets renamed by an app update.
-     */
-    private fun resetIfNewGame(fen: String) {
-        if (fen == STARTPOS) {
-            BridgePublisher.resetForNewGame()
-            synchronized(lock) { lastUserColor = null }
-            BridgeAccess.lastUserColor = null
-        }
     }
 
     // ------------------------------------------------------------ extractors

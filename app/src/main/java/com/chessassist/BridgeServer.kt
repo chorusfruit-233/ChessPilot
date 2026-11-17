@@ -2,6 +2,7 @@ package com.chessassist
 
 import android.util.Log
 import com.chessassist.engine.EngineLoop
+import io.github.a1175815821.chesspilot.GameEnd
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Protocol: UTF-8 JSON, one object per line.
  *   hook -> app : {"t":"position","fen":"...","user":"w","turn":"w","moves":"e2e4 .."}
+ *                 Carries `game` and, on terminal snapshots, `end` and `outcome`.
  *   hook -> app : {"t":"ack","drawn":"e2e4"}
  *   hook -> app : {"t":"help","code":"promotion|stuck","move":"e7e8q"}
  *   app  -> hook: {"t":"bestmove","move":"e2e4","fen":"...","autoplay":"0","autoplayDelay":"450"}
@@ -33,6 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   app  -> hook: {"t":"clearponder"} (drop the red prediction, keep the yellow best arrow)
  *   app  -> hook: {"t":"clear"}
  *   app  -> hook: {"t":"play","move":"e2e4","fen":"...","autoplayDelay":"450"}
+ *                 Position commands echo `game`. Engine-detected terminal FENs
+ *                 send `game_end` for that exact game and FEN.
  */
 object BridgeServer {
 
@@ -164,7 +168,10 @@ object BridgeServer {
         }
     }
 
-    fun pushBestmove(move: String, fen: String, autoplay: Boolean, autoplayDelayMs: Long, ponderHit: Boolean = false) {
+    fun pushBestmove(
+        move: String, fen: String, autoplay: Boolean, autoplayDelayMs: Long,
+        ponderHit: Boolean = false, gameId: String? = null,
+    ) {
         push(JSONObject().apply {
             put("t", "bestmove")
             put("move", move)
@@ -172,34 +179,51 @@ object BridgeServer {
             put("autoplay", if (autoplay) "1" else "0")
             put("autoplayDelay", autoplayDelayMs.toString())
             put("source", if (ponderHit) "ponder" else "search")
+            put("game", gameId)
         })
     }
 
-    fun pushClear() {
-        push(JSONObject().apply { put("t", "clear") })
+    fun pushClear(gameId: String? = null) {
+        push(JSONObject().apply { put("t", "clear"); put("game", gameId) })
+    }
+
+    fun discardQueuedMoves() = synchronized(sendLock) {
+        pendingQueue.removeAll { it.optString("t") in setOf("bestmove", "play", "ponder") }
+    }
+
+    fun pushGameEnd(fen: String, gameId: String?, end: GameEnd) {
+        push(JSONObject().apply {
+            put("t", "game_end")
+            put("fen", fen)
+            put("game", gameId)
+            put("end", end.reason)
+            put("outcome", end.outcome)
+        })
     }
 
     /** Ponder prediction for the hook's red display-only arrow (see protocol). */
-    fun pushPonderGuess(move: String, fen: String) {
+    fun pushPonderGuess(move: String, fen: String, gameId: String?) {
         push(JSONObject().apply {
             put("t", "ponder")
             put("move", move)
             put("fen", fen)
+            put("game", gameId)
         })
     }
 
     /** Retire the red prediction arrow without disturbing the bestmove arrow. */
-    fun pushClearPonder() {
-        push(JSONObject().apply { put("t", "clearponder") })
+    fun pushClearPonder(gameId: String? = null) {
+        push(JSONObject().apply { put("t", "clearponder"); put("game", gameId) })
     }
 
     /** Semi-auto: user tapped the banner button — play this exact (move, fen). */
-    fun pushPlay(move: String, fen: String, autoplayDelayMs: Long) {
+    fun pushPlay(move: String, fen: String, autoplayDelayMs: Long, gameId: String?) {
         push(JSONObject().apply {
             put("t", "play")
             put("move", move)
             put("fen", fen)
             put("autoplayDelay", autoplayDelayMs.toString())
+            put("game", gameId)
         })
     }
 
@@ -269,13 +293,20 @@ object BridgeServer {
         }
         when (o.optString("t")) {
             "position" -> {
-                val fen = o.optString("fen").ifEmpty { null } ?: return
+                val fen = o.optString("fen").ifEmpty { null }
+                val game = o.optString("game").ifEmpty { null }
+                val end = o.optString("end").ifEmpty { null }?.let {
+                    GameEnd(it, o.optString("outcome").ifEmpty { null })
+                }
+                if (fen == null && game == null && end == null) return
                 val moves = o.optString("moves").split(' ').filter { it.length >= 4 }
                 EngineLoop.onPosition(
                     fen = fen,
                     userColor = o.optString("user").ifEmpty { null },
                     turnColor = o.optString("turn").ifEmpty { null },
                     moves = moves,
+                    gameId = game,
+                    end = end,
                 )
             }
             "ack" -> EngineLoop.onArrowAck(o.optString("drawn"))

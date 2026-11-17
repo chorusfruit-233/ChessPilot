@@ -41,13 +41,32 @@ mz6.c0()      // dispatches the ResetArrows singleton aaz.a via F(...)
 mz6.H(row: Int, col: Int): h55  // 1-based; white subtracts 1, black uses 8-index
 ```
 
-`MainHook` already discovers all zero-argument state getters by return type, and
-`ArrowPainter` already discovers the exact draw signature. Arrow clearing must
+`MainHook` hooks the mapped live state getter and `ArrowPainter` discovers the
+exact draw signature. Arrow clearing must
 use the generated `methods.clearArrows` mapping: the old hard-coded `r()` is now
 an unrelated four-argument method. Arrow generation still rotates both square
 indices by `7-index` for Black; automatic taps retain the same orientation.
 The controller no longer owns the Rive View directly; constructor hooks on the
 kept `app.rive.runtime.kotlin.RiveAnimationView` remain the view discovery path.
+
+For game lifecycle detection, the module reads the live getter `mz6.J()` and
+observes `mz6.O(nx5)` board setup. PvP resync uses the same setup method, so the
+same controller keeps its result. `k25.j(bd6)` supplies an explicit new mini
+match ID and can rearm play on the same controller.
+
+| Live handler | Result data |
+|---|---|
+| `com.duolingo.feature.chess.match.j.I(...)` | Bot result in argument 1, server and client end conditions in arguments 4/5. Kotlin default-mask bits 8/16 mark omitted conditions. |
+| `com.duolingo.feature.chess.match.j.N(...)` | Bot timeout, resignation, or abandonment from the client end condition. |
+| `tr6.G(ar6, pq8)` | Accepted PvP game-end event, including winning color and end condition in `ar6.a/b`. |
+| `k25.m(...)`, `le6.F()` | Mini match result and its end condition, with the session clock as a fallback when the session finishes before a round result. |
+| `r37.onCleared()` | The active board's session was closed. |
+
+The session's `r37.l()` returns its board controller. End events are applied
+only to the current controller. The loopback snapshot includes the game ID
+and optional result, so reconnects replay the result even if the FEN stayed
+the same. The remap generator validates the handler signatures and fields
+against the APK before writing the mapping.
 
 Regenerate and verify with the same bundle:
 

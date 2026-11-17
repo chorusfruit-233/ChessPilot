@@ -4,6 +4,8 @@ import com.chessassist.BridgeServer
 import com.chessassist.BridgeSettings
 import io.github.a1175815821.chesspilot.BridgeClient
 import io.github.a1175815821.chesspilot.BridgePublisher
+import io.github.a1175815821.chesspilot.GameEnd
+import io.github.a1175815821.chesspilot.StateBridge
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
@@ -39,6 +41,10 @@ class PonderAutoplayTest {
         set(EngineLoop, "lastPonderHit", null)
         set(EngineLoop, "lastResultFromPonder", false)
         set(EngineLoop, "lastPonderMove", "e7e5")
+        val initialPosition = get<Any>(EngineLoop, "pending").javaClass.getDeclaredConstructor()
+            .apply { isAccessible = true }.newInstance()
+        set(EngineLoop, "pending", initialPosition)
+        set(EngineLoop, "analysingClient", null)
         val session = PonderSession(source, "e7e5", history)
         session.thread = Thread {} // Completed ponder still owns a prepared PV.
         session.update(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
@@ -46,7 +52,7 @@ class PonderAutoplayTest {
         synchronized(get<Any>(BridgeServer, "sendLock")) {
             get<ArrayDeque<JSONObject>>(BridgeServer, "pendingQueue").clear()
         }
-        BridgePublisher.resetForNewGame()
+        BridgePublisher.resetPosition()
     }
 
     @After fun cleanup() {
@@ -78,6 +84,150 @@ class PonderAutoplayTest {
         }
         fail("No autoplay command; events=${EngineLoop.recentEvents()}")
         error("unreachable")
+    }
+
+    private fun commands(): List<JSONObject> = synchronized(get<Any>(BridgeServer, "sendLock")) {
+        get<ArrayDeque<JSONObject>>(BridgeServer, "pendingQueue").toList()
+    }
+
+    private fun deliver(snapshot: JSONObject) {
+        val reader = BridgeServer.javaClass.getDeclaredMethod("handleLine", String::class.java)
+            .apply { isAccessible = true }
+        reader.invoke(BridgeServer, snapshot.toString())
+    }
+
+    @Test fun timeoutWithoutFenChangeCancelsAnalysisAndDiscardsItsLateReply() {
+        val board = StateBridge()
+        val controller = Any()
+        board.onBoardSetup(controller)
+        board.acceptExternalFen(target)
+        assertTrue(board.canPlay(board.gameId, target))
+        deliver(get(BridgeClient, "lastSnapshot"))
+        val entered = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        main.onAnalyse = {
+            entered.countDown()
+            check(cancelled.await(3, TimeUnit.SECONDS))
+            returned.countDown()
+        }
+        main.onStopEngine = { cancelled.countDown() }
+        startWorker()
+        try {
+            assertTrue("Analysis never began", entered.await(3, TimeUnit.SECONDS))
+            board.onGameEnd(controller, GameEnd("TIMEOUT", "WIN"))
+            assertFalse(board.canPlay(board.gameId, target))
+            val ended = get<JSONObject>(BridgeClient, "lastSnapshot")
+            assertEquals(target, ended.getString("fen"))
+            assertEquals("TIMEOUT", ended.getString("end"))
+            deliver(ended)
+            assertTrue("Terminal message did not stop the active search", returned.await(2, TimeUnit.SECONDS))
+
+            // An unchanged live frame and an attempted manual replay cannot
+            // clear the sticky result or revive the discarded recommendation.
+            EngineLoop.onPosition(target, "w", "w", history + "e7e5", board.gameId)
+            val after = EngineLoop.lastLoopAt
+            val deadline = System.nanoTime() + 1_000_000_000L
+            while (EngineLoop.lastLoopAt <= after && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue("Worker did not tick after cancellation", EngineLoop.lastLoopAt > after)
+            EngineLoop.playPendingBestmove()
+            assertEquals("胜利 · 超时", EngineLoop.snapshot().gameResult)
+            assertEquals("本局已停止", EngineLoop.snapshot().autoLine)
+            assertTrue(commands().none { it.optString("t") in listOf("bestmove", "play", "ponder") })
+            assertEquals(1, main.analyses.get())
+        } finally {
+            cancelled.countDown()
+        }
+    }
+
+    @Test fun terminalSnapshotClearsQueuedAutoplayAndAnIdenticalFenInTheNextGameCanPlay() {
+        EngineLoop.onPosition(target, "w", "w", emptyList(), "first-game")
+        startWorker()
+        assertEquals("first-game", waitForCommand().getString("game"))
+        EngineLoop.onPosition(target, "w", "w", emptyList(), "first-game", GameEnd("RESIGNATION", "WIN"))
+        assertTrue(commands().none { it.optString("t") == "bestmove" })
+        assertNull(EngineLoop.snapshot().bestMove)
+
+        EngineLoop.onPosition(target, "w", "w", emptyList(), "second-game")
+        EngineLoop.onPosition(target, "w", "w", emptyList(), "first-game", GameEnd("CHECKMATE", "LOSS"))
+        val command = waitForCommand()
+        assertEquals("second-game", command.getString("game"))
+        assertEquals("1", command.getString("autoplay"))
+        assertEquals(2, main.analyses.get())
+        assertNull(EngineLoop.snapshot().gameStatus)
+    }
+
+    @Test fun endingDuringPonderClearsItsCacheAndFutureGuesses() {
+        EngineLoop.onPosition(source, "w", "b", history, "ponder-game")
+        ponder.start()
+        set(EngineLoop, "ponderClient", ponder)
+        set(EngineLoop, "lastPonderMove", "e7e5")
+        val entered = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        ponder.onPonder = { flag, update ->
+            update(BestMove("g1f3", null, 20, 18, positionFen = target))
+            entered.countDown()
+            val limit = System.nanoTime() + 3_000_000_000L
+            while (!flag.get() && System.nanoTime() < limit) Thread.sleep(5)
+            if (flag.get()) finished.countDown()
+        }
+        startWorker()
+        assertTrue(entered.await(3, TimeUnit.SECONDS))
+        EngineLoop.onPosition(source, "w", "b", history, "ponder-game", GameEnd("AGREEMENT", "DRAW"))
+        assertTrue("Ponder flag was not cancelled", finished.await(2, TimeUnit.SECONDS))
+        assertEquals("和棋 · 协议和棋", EngineLoop.snapshot().gameResult)
+        assertEquals("本局已停止", EngineLoop.ponderLine())
+        assertNull(get<PonderSession?>(EngineLoop, "ponderSession"))
+        assertTrue(commands().none { it.optString("t") == "ponder" })
+    }
+
+    @Test fun gameOverSurvivesResyncAndReloadButANewMiniMatchCanPlay() {
+        val controller = Any()
+        val original = StateBridge()
+        original.onBoardSetup(controller, "mini-one")
+        original.acceptExternalFen(target)
+        val oldGameId = original.gameId
+        assertTrue(original.canPlay(oldGameId, target))
+        original.onGameEnd(Any(), GameEnd("TIMEOUT"))
+        assertTrue(original.canPlay(oldGameId, target))
+        original.onGameEnd(controller, GameEnd("REPETITION", "DRAW"))
+        original.onGameEnd(controller, GameEnd("LEFT_BOARD"))
+        original.onBoardSetup(controller) // Same-controller resync.
+        original.acceptExternalFen(source)
+        assertFalse(original.canPlay(oldGameId, target))
+        val saved = HashMap<String, Any>()
+        original.saveForReload(saved)
+
+        val reloaded = StateBridge()
+        reloaded.restoreAfterReload(saved, controller)
+        val reconnect = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals(oldGameId, reconnect.getString("game"))
+        assertEquals("REPETITION", reconnect.getString("end"))
+        assertEquals("DRAW", reconnect.getString("outcome"))
+        assertFalse(reloaded.canPlay(oldGameId, target))
+        reloaded.onBoardSetup(controller, "mini-two")
+        reloaded.acceptExternalFen(target)
+        reloaded.onEngineGameEnd(oldGameId, target, GameEnd("NO_LEGAL_MOVES"))
+        assertNotEquals(oldGameId, reloaded.gameId)
+        assertFalse(reloaded.canPlay(oldGameId, target))
+        assertTrue(reloaded.canPlay(reloaded.gameId, target))
+    }
+
+    @Test fun engineTerminalPositionSendsTheEndToTheHookForTheSameGame() {
+        main.analysisResult = BestMove("(none)", null, 0, isMate = true)
+        EngineLoop.onPosition(target, "w", "w", emptyList(), "engine-terminal")
+        startWorker()
+        val deadline = System.nanoTime() + 2_000_000_000L
+        var end = commands().firstOrNull { it.optString("t") == "game_end" }
+        while (end == null && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+            end = commands().firstOrNull { it.optString("t") == "game_end" }
+        }
+        assertNotNull(end)
+        assertEquals("CHECKMATE", end!!.getString("end"))
+        assertEquals("engine-terminal", end.getString("game"))
+        assertEquals(target, end.getString("fen"))
+        assertTrue(commands().none { it.optString("t") == "bestmove" })
     }
 
     private fun assertPreparedAutoplay(command: JSONObject, fen: String = target) {
@@ -204,17 +354,23 @@ class PonderAutoplayTest {
         val ponders = AtomicInteger()
         var onHit: (() -> Unit)? = null
         var onStop: (() -> Unit)? = null
+        var onAnalyse: (() -> Unit)? = null
+        var onStopEngine: (() -> Unit)? = null
+        var onPonder: ((AtomicBoolean, (BestMove) -> Unit) -> Unit)? = null
+        var analysisResult = BestMove("b1c3", null, 10, 16) // Differs from cached g1f3.
         private var live = true
         override fun isRunning() = live
         override fun start() { live = true }
-        override fun stop() { live = false }
+        override fun stop() { live = false; onStopEngine?.invoke() }
         override fun analyse(fen: String, movetimeMs: Long, depth: Int): BestMove {
             analyses.incrementAndGet()
-            return BestMove("b1c3", null, 10, 16) // Deliberately differs from cached g1f3.
+            onAnalyse?.invoke()
+            return analysisResult
         }
         override fun ponder(fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
                             stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit): BestMove? {
             ponders.incrementAndGet()
+            onPonder?.invoke(stopFlag, onUpdate)
             return null
         }
         override fun signalPonderHit() { onHit?.invoke() }

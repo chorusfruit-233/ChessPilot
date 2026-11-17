@@ -35,6 +35,15 @@ class ArrowPainter(private val remap: Remap) {
 
     private val mainHandler = GenerationHandler(Looper.getMainLooper())
 
+    fun cancelPending() = mainHandler.cancelPending()
+
+    fun clearAfterGame() {
+        val owner = BridgeAccess.boardController ?: return
+        mainHandler.post {
+            if (BridgeAccess.boardController === owner) clear()
+        }
+    }
+
     fun close() {
         mainHandler.close()
         sMethod = null
@@ -200,6 +209,12 @@ class ArrowPainter(private val remap: Remap) {
         uciMove: String, from: String, to: String,
         waitedMs: Long = 0, colorName: String = "YELLOW", fen: String? = null,
     ) {
+        val current = if (colorName == "YELLOW") {
+            BridgePublisher.lastBestMove == uciMove && BridgePublisher.lastBestMoveFen == fen
+        } else {
+            BridgePublisher.lastPonderMove == uciMove && BridgePublisher.lastPonderFen == fen
+        }
+        if (!current || BridgePublisher.lastAnalyzedFen != fen) return
         val sinceTrigger = System.currentTimeMillis() - BridgePublisher.lastTriggerAt
         if (sinceTrigger < QUIET_MS && waitedMs < QUIET_CAP_MS) {
             mainHandler.postDelayed({ drawOnMain(uciMove, from, to, waitedMs + 300, colorName, fen) }, 300)

@@ -25,16 +25,28 @@ internal object HookRuntime {
         if (active) callbacks.run(action)
     }
 
-    fun after(executable: Executable, role: String, action: (XposedInterface.Chain, Any?) -> Unit) {
+    fun after(executable: Executable, role: String, action: (XposedInterface.Chain, Any?) -> Unit) =
+        install(executable, role, before = false, action)
+
+    fun before(executable: Executable, role: String, action: (XposedInterface.Chain) -> Unit) =
+        install(executable, role, before = true) { chain, _ -> action(chain) }
+
+    private fun install(
+        executable: Executable, role: String, before: Boolean, action: (XposedInterface.Chain, Any?) -> Unit,
+    ) {
         val id = "chesspilot:$role:$executable"
         api!!.hook(executable).setId(id)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
-                val result = chain.proceed()
-                runIfActive {
-                    try { action(chain, result) }
-                    catch (e: Exception) { MainHook.log("$role callback failed: $e") }
+                fun invoke(result: Any?) {
+                    runIfActive {
+                        try { action(chain, result) }
+                        catch (e: Exception) { MainHook.log("$role callback failed: $e") }
+                    }
                 }
+                if (before) invoke(null)
+                val result = chain.proceed()
+                if (!before) invoke(result)
                 result
             }
         installedIds.add(id)

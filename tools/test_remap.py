@@ -84,7 +84,9 @@ class RemapTests(unittest.TestCase):
         dex = Mock()
         dex.get_classes.return_value = [state]
         with self.assertRaisesRegex(ValueError, "chessGameState layout changed"):
-            verify_runtime_layout({"classes.dex": dex}, {"chessGameState": "Lox5;", "chessFen": "Ldm5;"})
+            verify_runtime_layout({"classes.dex": dex}, {
+                "chessGameState": "Lox5;", "chessFen": "Ldm5;", "setupModel": "Lnx5;",
+            })
 
     def test_bundle_selects_base_instead_of_base_named_split(self):
         with tempfile.TemporaryDirectory() as tmp:

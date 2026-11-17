@@ -23,10 +23,10 @@ class AssistService : LifecycleService() {
             .setOngoing(true)
             .build()
         startForeground(Notify.NOTIF_ID, notification)
-        BridgeServer.start()
-        EngineLoop.start(applicationContext)
         OverlayManager.onPlay = { EngineLoop.playPendingBestmove() }
         OverlayManager.init(this)
+        BridgeServer.start()
+        EngineLoop.start(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

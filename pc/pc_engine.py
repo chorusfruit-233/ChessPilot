@@ -41,6 +41,7 @@ Usage:
 import argparse
 import json
 import queue
+import select
 import shutil
 import socket
 import subprocess
@@ -306,17 +307,20 @@ class Engine:
             return f"go depth {depth}"
         return f"go movetime {movetime_ms}"
 
-    def _collect_result(self, req_id, timeout):
+    def _collect_result(self, req_id, timeout, disconnected=None):
         """Read lines until bestmove (single-job: any bestmove is ours)."""
         depth = 0
         score = None
         is_mate = False
         end = time.time() + timeout
         while time.time() < end:
+            if disconnected is not None and disconnected():
+                raise ConnectionAbortedError("phone disconnected during search")
             try:
-                line = self.lines.get(timeout=max(0.1, end - time.time()))
+                remaining = max(0.0, end - time.time())
+                line = self.lines.get(timeout=min(remaining, 0.2) if disconnected else remaining)
             except queue.Empty:
-                break
+                continue
             if line is None:
                 break
             if line.startswith("info depth "):
@@ -351,7 +355,7 @@ class Engine:
         return None
 
     # -- jobs (all hold `lock`: one job at a time) ----------------------
-    def analyse(self, req_id, fen, movetime_ms=0, depth=0):
+    def analyse(self, req_id, fen, movetime_ms=0, depth=0, disconnected=None):
         with self.lock:
             if not self._sane_fen(fen):
                 return {"t": "error", "id": req_id,
@@ -377,7 +381,7 @@ class Engine:
                 return {"t": "error", "id": req_id, "message": f"send: {e}"}
             budget = 180 if use_d else (use_mt / 1000 + 30)
             t0 = time.time()
-            res = self._collect_result(req_id, budget)
+            res = self._collect_result(req_id, budget, disconnected)
             dt = time.time() - t0
             if res is None:
                 log(f"analyse #{req_id}: TIMEOUT after {dt:.1f}s, restarting engine")
@@ -539,6 +543,15 @@ def handle_conn(conn, addr, engine):
         with send_lock:
             conn.sendall((json.dumps(result) + "\n").encode("utf-8"))
 
+    def disconnected():
+        # A game-end cancellation closes this dedicated connection. Check for
+        # EOF without consuming any next JSON request while Stockfish runs.
+        try:
+            readable, _, _ = select.select([conn], [], [], 0)
+            return bool(readable) and not conn.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
+
     try:
         for raw in f:
             raw = raw.strip()
@@ -554,7 +567,7 @@ def handle_conn(conn, addr, engine):
                 if t == "analyse":
                     res = engine.analyse(rid, o.get("fen", ""),
                                          o.get("movetimeMs", 0) or 0,
-                                         o.get("depth", 0) or 0)
+                                         o.get("depth", 0) or 0, disconnected)
                 elif t == "ponder":
                     res = engine.ponder(rid, o.get("fen", ""),
                                         o.get("ponderMove", ""),
@@ -577,6 +590,8 @@ def handle_conn(conn, addr, engine):
                 else:
                     res = {"t": "error", "id": rid,
                            "message": f"unknown command: {t}"}
+            except ConnectionAbortedError:
+                break
             except Exception as e:
                 res = {"t": "error", "id": rid, "message": str(e)[:200]}
             try:
