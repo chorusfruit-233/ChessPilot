@@ -1,0 +1,35 @@
+{
+  "version_name": "0.6.3",
+  "version_code": 10,
+  "application_id": "com.chessassist",
+  "commit": "eea0ed0b5d96d89ab9df9f4eaa9615f2cfe312ae",
+  "stockfish_tag": "sf_19",
+  "stockfish_commit": "edb0d9db6731067ec50ce619ff372b463bc4dd5d",
+  "nnue": {
+    "name": "nn-1a298aa575a0.nnue",
+    "sha256": "1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2"
+  },
+  "unsigned_apk": {
+    "name": "ChessPilot-0.6.3-unsigned.apk",
+    "sha256": "21d07a8ad1d3a7fbf46f8093556af815e133d1d713114bf7945ee354c4ad2fed"
+  },
+  "source_archive": {
+    "name": "ChessPilot-0.6.3-source.tar.gz",
+    "sha256": "ecdcc0a88a5e5d3cb9ddeabbf5330c490af14d3018ce0c7b8de754738d5020fe"
+  },
+  "github_actions_run": "https://github.com/chorusfruit-233/ChessPilot/actions/runs/44159387693",
+  "signing": {
+    "location": "signed after downloading the GitHub Actions artifact",
+    "certificate_sha256": "d29e99ed350b5e5f77860f3404b990de9ca4f126678c8c71a4c7c3fd4d394184",
+    "identity": "same test certificate as previous ChessPilot test APKs",
+    "verified_schemes": [
+      "v2",
+      "v3"
+    ]
+  },
+  "published_apk": {
+    "name": "ChessPilot-0.6.3-arm64-v8a.apk",
+    "sha256": "2c9f25e1fb6e2438bce19f1eb779597e3eb7247dee93fd1acbb2d31e8cc8f153",
+    "size": 81518104
+  }
+}
