@@ -60,6 +60,7 @@ class MainActivity : Activity() {
 
     // KV 状态卡
     private lateinit var kvHook: TextView
+    private lateinit var kvModule: TextView
     private lateinit var kvNnue: TextView
     private lateinit var kvEngine: TextView
     private lateinit var kvBackend: TextView
@@ -73,6 +74,7 @@ class MainActivity : Activity() {
 
     // 操作与设置
     private lateinit var toggleBtn: Button
+    private lateinit var reloadBtn: Button
     private lateinit var funcSection: Ui.Section
     private lateinit var autoRow: Ui.SwitchRow
     private lateinit var berserkRow: Ui.SwitchRow
@@ -256,6 +258,7 @@ class MainActivity : Activity() {
             return row.value
         }
         kvHook = kv("Hook 连接")
+        kvModule = kv("模块状态")
         kvNnue = kv("NNUE")
         kvEngine = kv("引擎")
         kvBackend = kv("算力后端")
@@ -311,6 +314,14 @@ class MainActivity : Activity() {
             marginStart = dp(10)
         })
         content.addView(quickRow, topMargin(dp(10)))
+        reloadBtn = Ui.secondaryButton(this).apply {
+            text = "热重载多邻国模块"
+            setOnClickListener {
+                ModuleConnection.reloadUpdatedModule()
+                renderStatus(EngineLoop.snapshot())
+            }
+        }
+        content.addView(reloadBtn, topMargin(dp(10)))
         content.addView(View(this), LinearLayout.LayoutParams(1, dp(20)))
 
         // ================= 功能设置（默认展开） =================
@@ -543,6 +554,9 @@ class MainActivity : Activity() {
 
         kvHook.text = s.hookLine
         kvHook.setTextColor(if (s.hookLine.startsWith("已连接")) ChessMath.C_WIN else Ui.T2)
+        kvModule.text = ModuleConnection.status
+        reloadBtn.isEnabled = ModuleConnection.canReload()
+        reloadBtn.text = if (ModuleConnection.busy) "正在热重载…" else "热重载多邻国模块"
         kvNnue.text = s.nnue
         kvEngine.text = s.engineResLine
         kvBackend.text = s.backendLine

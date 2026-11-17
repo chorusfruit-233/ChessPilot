@@ -24,7 +24,13 @@ import android.view.View
  */
 class AutoPlayer(private val bridge: StateBridge) {
 
-    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val mainHandler = GenerationHandler(android.os.Looper.getMainLooper())
+
+    fun close() {
+        mainHandler.close()
+        activeKey = null
+        inFlightKey = null
+    }
     private val rand = java.util.Random()
 
     companion object {

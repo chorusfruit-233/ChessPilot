@@ -1,9 +1,7 @@
 package io.github.a1175815821.chesspilot
 
 import android.graphics.Color
-import android.os.Handler
 import android.os.Looper
-import de.robv.android.xposed.XposedHelpers
 
 /**
  * Draws the Stockfish best-move arrow **natively inside Duolingo's own Rive board** by
@@ -35,7 +33,14 @@ class ArrowPainter(private val remap: Remap) {
         const val BEST_MAX_AGE_MS = 120_000L
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = GenerationHandler(Looper.getMainLooper())
+
+    fun close() {
+        mainHandler.close()
+        sMethod = null
+        clearMethod = null
+        clearMethodFor = null
+    }
 
     private var sMethod: java.lang.reflect.Method? = null
 
@@ -374,7 +379,7 @@ class ArrowPainter(private val remap: Remap) {
         val col = coord[0] - 'a'
         val row = coord[1] - '1'
         return try {
-            XposedHelpers.newInstance(squareClz, row, col)
+            Reflect.newInstance(squareClz, row, col)
         } catch (t: Throwable) {
             MainHook.log("makeSquare failed: $t")
             null
@@ -383,7 +388,7 @@ class ArrowPainter(private val remap: Remap) {
 
     private fun enumConstant(loader: ClassLoader, key: String, name: String): Any? = try {
         val clz = remap.resolveClass(loader, key) ?: return null
-        XposedHelpers.getStaticObjectField(clz, name)
+        Reflect.getStaticObjectField(clz, name)
     } catch (t: Throwable) {
         MainHook.log("enum $key.$name failed: $t")
         null

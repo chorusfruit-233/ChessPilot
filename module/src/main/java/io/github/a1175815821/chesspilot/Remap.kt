@@ -1,7 +1,6 @@
 package io.github.a1175815821.chesspilot
 
 import android.content.Context
-import de.robv.android.xposed.XposedHelpers
 import org.json.JSONObject
 
 /**
@@ -41,7 +40,7 @@ class Remap private constructor(private var map: JSONObject) {
                 if (name.isNullOrEmpty()) continue
                 val dotted = name.replace('/', '.')
                 try {
-                    resolved = XposedHelpers.findClass(dotted, loader)
+                    resolved = Reflect.findClass(dotted, loader)
                     break
                 } catch (_: Throwable) { /* try next candidate */ }
             }
@@ -69,6 +68,14 @@ class Remap private constructor(private var map: JSONObject) {
 
 /** Shared runtime accessors for the various hook components. */
 object BridgeAccess {
+    fun clear() {
+        context = null
+        boardController = null
+        lastUserColor = null
+        lastState = null
+        riveView = null
+        riveCandidates = emptyList()
+    }
     @Volatile var context: Context? = null
     @Volatile var boardController: Any? = null
     /** Last known user color ("w"|"b") — mirrors StateBridge for flip-aware fallbacks. */

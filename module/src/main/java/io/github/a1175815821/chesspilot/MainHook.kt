@@ -1,282 +1,195 @@
 package io.github.a1175815821.chesspilot
 
+import android.app.Activity
 import android.app.Application
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.content.Context
+import android.view.View
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
+import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
+import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
+import java.util.HashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * LSPosed entry point. Scope is com.duolingo only (see res/values/arrays.xml).
- *
- * Strategy (see docs/REVERSE_ENGINEERING.md):
- *  - Primary:  hook [chessGameState] constructor  → every new position surfaces here.
- *  - Secondary: hook [chessFen] constructor       → raw FEN parts (works in lesson + match modes).
- *  - UI:       hook [boardController] `g()` return → confirms the Rive board rendered `state`,
- *              and gives us the object to call `s(...)` (arrow) / `f(col,row)` (tap→square) on.
- *  - Fallback: ViewModel StateFlow tap if constructors are renamed or not hit.
- *
- * All names come from assets/remap.json so the module survives R8 renames across app updates
- * (regenerate with tools/remap.py).
- */
-class MainHook : IXposedHookLoadPackage {
-
+/** API 102 entry; this single entry is also the unit of hot reload. */
+class MainHook : XposedModule() {
     companion object {
-        private const val TAG = "DuoChessAssist"
-        private const val TARGET_PACKAGE = "com.duolingo"
-        fun log(msg: String) = XposedBridge.log("[$TAG] $msg")
+        private const val TARGET = "com.duolingo"
+        fun log(message: String) = HookRuntime.log(message)
     }
 
-    private lateinit var remap: Remap
-    private lateinit var bridge: StateBridge
-    private lateinit var arrowPainter: ArrowPainter
     private val initialized = AtomicBoolean(false)
+    private var targetLoader: ClassLoader? = null
+    private var bridge: StateBridge? = null
+    private var painter: ArrowPainter? = null
+    private var remap: Remap? = null
 
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName != TARGET_PACKAGE) return
-        // The companion command queue is single-slot consume-once: every process that
-        // polls it can steal the foreground board's bestmove. Duolingo ships a :Unity
-        // (ads) process, so only the main process may hook/poll.
-        if (lpparam.processName != TARGET_PACKAGE) {
-            log("skip non-main process=${lpparam.processName}")
-            return
-        }
-        log("loaded into ${lpparam.packageName} process=${lpparam.processName}")
-
-        // Defer everything else until Application.attach fires: we need a Context to
-        // load OUR remap.json via AssetManager (assets are invisible to ClassLoader).
-        hookApplicationAttach(lpparam)
+    override fun onModuleLoaded(param: ModuleLoadedParam) {
+        if (param.processName != TARGET || param.isSystemServer) { detach(); return }
+        HookRuntime.activate(this)
+        log("loaded ${param.processName}, libxposed API $apiVersion")
+        hookApplicationAttach()
     }
 
-    // ---------------------------------------------------------------- Application
-
-    /** Grab the app Context as early as possible (needed for overlay/display metrics later). */
-    private fun hookApplicationAttach(lpparam: XC_LoadPackage.LoadPackageParam) {
-        XposedHelpers.findAndHookMethod(
-            Application::class.java,
-            "attach",
-            android.content.Context::class.java,
-            object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    try {
-                        BridgeAccess.context = param.args[0] as android.content.Context
-                        log("context captured: ${BridgeAccess.context}")
-                    } catch (t: Throwable) {
-                        log("context capture failed: $t")
-                        return
-                    }
-                    if (initialized.compareAndSet(false, true)) {
-                        initAfterContext(lpparam)
-                    }
-                }
-            }
-        )
-    }
-
-    /** Runs once, on the main process, right after we own a Context. */
-    private fun initAfterContext(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            // NOTE: no AssetManager/PackageManager lookups here on purpose. Assets are
-            // invisible to the module ClassLoader in the target process, and
-            // createPackageContext(ours) from Duolingo always throws NameNotFoundException
-            // on Android 11+ (package visibility). The table is baked in at compile time.
-            remap = Remap.fromBaked()
-            log("remap table v${RemapTable.APP_VERSION}")
-            bridge = StateBridge()
-            arrowPainter = ArrowPainter(remap)
-
-            hookChessGameState(lpparam)
-            hookChessFen(lpparam)
-            hookBoardController(lpparam)
-            hookRiveViews(lpparam)
-            ViewModelFallback.hook(lpparam, remap, bridge)
-            hookActivityPause()
-            CommandLoop.configure(remap, bridge, arrowPainter)
-        } catch (t: Throwable) {
-            log("initAfterContext failed: $t")
+    override fun onPackageReady(param: PackageReadyParam) {
+        if (param.packageName != TARGET || !param.isFirstPackage) return
+        HookRuntime.runIfActive {
+            targetLoader = param.classLoader
+            currentApplication()?.let { initialize(it, param.classLoader) }
         }
     }
 
-    // ---------------------------------------------------------------- Rive views
-
-    /**
-     * TYPE_APPLICATION_OVERLAY is a GLOBAL window: a fallback arrow drawn in-game used
-     * to keep floating above the launcher / other apps until the process died. Removing
-     * it whenever any activity pauses restores sane lifetime; a later draw re-adds it
-     * ([OverlayFallback.ensure] is idempotent).
-     */
-    private fun hookActivityPause() {
-        try {
-            XposedHelpers.findAndHookMethod(
-                android.app.Activity::class.java,
-                "onPause",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try { OverlayFallback.remove() } catch (_: Throwable) {}
-                    }
-                }
-            )
-            log("hooked Activity.onPause (overlay cleanup)")
-        } catch (t: Throwable) {
-            log("activity pause hook failed: $t")
+    private fun hookApplicationAttach() {
+        val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
+        HookRuntime.after(attach, "attach") { chain, _ ->
+            val context = chain.getArg(0) as Context
+            initialize(context, targetLoader ?: context.classLoader)
         }
     }
 
-    /**
-     * Record every Rive board-view instance at construction. Kept (unobfuscated) names,
-     * confirmed in 6.85.7 dex: `app.rive.runtime.kotlin.RiveAnimationView` and
-     * `com.duolingo.core.rive.RiveWrapperView2$CallbackRiveAnimationView`.
-     * This is the robust autoplay-tap target — the controller-field scan is only backup.
-     */
-    private fun hookRiveViews(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val loader = lpparam.classLoader
-        val names = listOf(
-            "app.rive.runtime.kotlin.RiveAnimationView",
-            "com.duolingo.core.rive.RiveWrapperView2\$CallbackRiveAnimationView",
-        )
-        for (name in names) {
-            try {
-                val clz = XposedHelpers.findClass(name, loader)
-                XposedBridge.hookAllConstructors(clz, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            (param.thisObject as? android.view.View)?.let {
-                                RiveViewFinder.noteCtorInstance("ctor", it)
-                            }
-                        } catch (t: Throwable) { log("rive ctor hook error: $t") }
-                    }
-                })
-                log("watching Rive views: $name")
-            } catch (t: Throwable) {
-                log("rive class not found (ok if renamed): $name")
-            }
+    private fun currentApplication(): Application? = try {
+        Class.forName("android.app.ActivityThread").getDeclaredMethod("currentApplication")
+            .invoke(null) as? Application
+    } catch (_: Exception) { null }
+
+    private fun initialize(context: Context, loader: ClassLoader) {
+        if (!initialized.compareAndSet(false, true)) return
+        BridgeAccess.context = context.applicationContext ?: context
+        targetLoader = loader
+        val table = Remap.fromBaked().also { remap = it }
+        val stateBridge = StateBridge().also { bridge = it }
+        val arrowPainter = ArrowPainter(table).also { painter = it }
+        log("remap table v${RemapTable.APP_VERSION}")
+        hookModels(loader, table, stateBridge, arrowPainter)
+        hookController(loader, table, stateBridge, arrowPainter)
+        hookRiveViews(loader)
+        HookRuntime.after(Activity::class.java.getDeclaredMethod("onPause"), "pause") { _, _ ->
+            OverlayFallback.remove()
         }
+        ViewModelFallback.hook(loader, stateBridge)
+        CommandLoop.configure(table, stateBridge, arrowPainter)
     }
 
-    // ---------------------------------------------------------------- primary: ChessGameState
-
-    private fun hookChessGameState(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val loader = lpparam.classLoader
-        val clz = remap.resolveClass(loader, "chessGameState")
-        if (clz == null) {
-            log("!! ChessGameState not found — check remap.json")
-            return
-        }
-        for (ctor in clz.declaredConstructors) {
-            try {
-                XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            val state = param.thisObject
-                            bridge.onGameState(state)
-                            // Immediately ask the painter to draw the best move for this state
-                            // if the analysis loop already has one (low-latency path: the arrow
-                            // is drawn the moment the board catches up to our analysis).
-                            arrowPainter.onGameState(state)
-                        } catch (t: Throwable) {
-                            log("state-hook error: $t")
-                        }
-                    }
-                })
-            } catch (t: Throwable) {
-                log("hook ctor failed $ctor: $t")
-            }
-        }
-        log("hooked ChessGameState = ${clz.name} (${clz.declaredConstructors.size} ctors)")
-    }
-
-    // ---------------------------------------------------------------- secondary: ChessFen
-
-    private fun hookChessFen(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val loader = lpparam.classLoader
-        val clz = remap.resolveClass(loader, "chessFen") ?: return
-        for (ctor in clz.declaredConstructors) {
-            try {
-                XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            bridge.onFen(param.thisObject, loader)
-                        } catch (t: Throwable) {
-                            log("fen-hook error: $t")
-                        }
-                    }
-                })
-            } catch (t: Throwable) { log("hook fen ctor failed: $t") }
-        }
-        log("hooked ChessFen = ${clz.name}")
-    }
-
-    // ---------------------------------------------------------------- UI: board controller
-
-    /**
-     * `cl5` is the Rive board controller:
-     *   g() → current ChessGameState (rendered)
-     *   s(from, to, animate, ArrowType, Int, ArrowColor) → draw arrow
-     *   f(col, row) → Square for a logical tap coordinate (auto-play mapping)
-     *   j(sq, sq2, SquareHighlightType) → square highlight
-     */
-    private fun hookBoardController(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val loader = lpparam.classLoader
-        val clz = remap.resolveClass(loader, "boardController")
-        if (clz == null) {
-            log("!! BoardController not found — arrows will use overlay fallback")
-            OverlayFallback.ensure()
-            return
-        }
-
-        // 1) observe the rendered state: hook every method returning the state class.
-        // Each registration is isolated: one bad method must not abort the rest.
-        val stateClz = remap.resolveClass(loader, "chessGameState")
-        for (m in clz.declaredMethods) {
-            if (stateClz != null && m.returnType == stateClz && m.parameterTypes.isEmpty()) {
+    private fun hookModels(loader: ClassLoader, table: Remap, stateBridge: StateBridge, arrows: ArrowPainter) {
+        for (key in listOf("chessGameState", "chessFen")) {
+            val type = table.resolveClass(loader, key)
+            if (type == null) { log("!! $key not found — check remap.json"); continue }
+            for (constructor in type.declaredConstructors) {
                 try {
-                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            try {
-                                BridgeAccess.boardController = param.thisObject
-                                val state = param.result
-                                if (state != null) {
-                                    bridge.onRenderedState(state)
-                                    arrowPainter.onRenderedState(state)
-                                }
-                            } catch (t: Throwable) { log("render-hook error: $t") }
+                    HookRuntime.after(constructor, key) { chain, _ ->
+                        val state = chain.thisObject
+                        if (state != null) {
+                            if (key == "chessGameState") {
+                                stateBridge.onGameState(state)
+                                arrows.onGameState(state)
+                            } else stateBridge.onFen(state, loader)
                         }
-                    })
-                    log("hooked boardController.g() = ${m.name}")
-                } catch (t: Throwable) { log("hook render method failed ${m.name}: $t") }
+                    }
+                } catch (e: Exception) { log("hook $key constructor failed: $e") }
+            }
+            log("hooked $key = ${type.name}")
+        }
+    }
+
+    private fun hookController(loader: ClassLoader, table: Remap, stateBridge: StateBridge, arrows: ArrowPainter) {
+        val type = table.resolveClass(loader, "boardController")
+        if (type == null) { log("!! BoardController not found"); return }
+        val stateType = table.resolveClass(loader, "chessGameState")
+        for (method in type.declaredMethods) {
+            if (stateType != null && method.returnType == stateType && method.parameterTypes.isEmpty()) {
+                try {
+                    HookRuntime.after(method, "render") { chain, result ->
+                        BridgeAccess.boardController = chain.thisObject
+                        if (result != null) {
+                            stateBridge.onRenderedState(result)
+                            arrows.onRenderedState(result)
+                        }
+                    }
+                } catch (e: Exception) { log("hook controller getter failed: $e") }
             }
         }
-
-        // 2) learn the app's own arrow-draw call signature (log-only, once per signature)
-        for (m in clz.declaredMethods) {
-            if (m.parameterTypes.size == 6 && m.parameterTypes[2] == Boolean::class.javaPrimitiveType) {
-                log("boardController.s candidate: ${m.name} ${m.parameterTypes.joinToString()}")
-            }
-        }
-
-        // Locate the live board View inside the controller so that OverlayFallback
-        // and AutoPlayer have real view bounds to work with. Runtime field scan
-        // (RiveViewFinder): matching declared types by name fails after R8 renames
-        // the wrapper types, which silently disabled autoplay ("no board view yet").
-        try {
-            XposedBridge.hookAllConstructors(clz, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    try {
-                        // A fresh board controller means a fresh board context (new
-                        // game / lesson retry): re-arm publishing so a repeated setup
-                        // republishes instead of being deduped away. Partial reset
-                        // on purpose — the last bestmove is kept for instant redraw.
+        for (constructor in type.declaredConstructors) {
+            try {
+                HookRuntime.after(constructor, "controller") { chain, _ ->
+                    val controller = chain.thisObject
+                    if (controller != null) {
+                        BridgeAccess.boardController = controller
                         BridgePublisher.resetPublishState()
-                        RiveViewFinder.onControllerCreated(param.thisObject)
-                    } catch (t: Throwable) {
-                        log("rive view discovery failed: $t")
+                        RiveViewFinder.onControllerCreated(controller)
                     }
                 }
-            })
-        } catch (t: Throwable) {
-            log("rive view discovery failed: $t")
+            } catch (e: Exception) { log("hook controller constructor failed: $e") }
+        }
+    }
+
+    private fun hookRiveViews(loader: ClassLoader) {
+        for (name in listOf("app.rive.runtime.kotlin.RiveAnimationView",
+            "com.duolingo.core.rive.RiveWrapperView2\$CallbackRiveAnimationView")) {
+            try {
+                for (constructor in Reflect.findClass(name, loader).declaredConstructors) {
+                    HookRuntime.after(constructor, "rive") { chain, _ ->
+                        (chain.thisObject as? View)?.let { RiveViewFinder.noteCtorInstance("ctor", it) }
+                    }
+                }
+            } catch (e: Exception) { log("Rive view unavailable: $name (${e.javaClass.simpleName})") }
+        }
+    }
+
+    override fun onHotReloading(param: HotReloadingParam): Boolean {
+        val callbacksStopped = HookRuntime.retireAndAwait()
+        CommandLoop.stop()
+        painter?.close()
+        val scanStopped = ViewModelFallback.stop()
+        val bridgeStopped = BridgeClient.stopForReload()
+        val overlayStopped = OverlayFallback.closeForReload()
+        // Only bootstrap/framework/target objects may cross generation boundaries.
+        val state = HashMap<String, Any>()
+        bridge?.saveForReload(state)
+        BridgeAccess.context?.let { state["context"] = it }
+        targetLoader?.let { state["loader"] = it }
+        BridgeAccess.boardController?.let { state["controller"] = it }
+        BridgeAccess.lastState?.let { state["state"] = it }
+        RiveViewFinder.bestRiveView()?.let { state["view"] = it }
+        RiveViewFinder.clear()
+        BridgeAccess.clear()
+        Reflect.clear()
+        if (!callbacksStopped || !scanStopped || !bridgeStopped || !overlayStopped) {
+            log("hot reload refused: old tasks have not stopped; restart Duolingo")
+            return false
+        }
+        param.setSavedInstanceState(state)
+        log("hot reload: generation retired")
+        return true
+    }
+
+    override fun onHotReloaded(param: HotReloadedParam) {
+        if (param.processName != TARGET || param.isSystemServer) { detach(); return }
+        HookRuntime.activate(this)
+        try {
+            val saved = param.savedInstanceState as? Map<*, *>
+            val context = saved?.get("context") as? Context ?: currentApplication()
+            targetLoader = saved?.get("loader") as? ClassLoader ?: context?.classLoader
+            hookApplicationAttach()
+            if (context != null && targetLoader != null) {
+                initialize(context, targetLoader!!)
+                val loader = targetLoader!!
+                val controller = saved?.get("controller")
+                if (controller != null && remap?.resolveClass(loader, "boardController")?.isInstance(controller) == true) {
+                    BridgeAccess.boardController = controller
+                    RiveViewFinder.onControllerCreated(controller)
+                }
+                (saved?.get("view") as? View)?.let { RiveViewFinder.noteCtorInstance("hot-reload", it) }
+                val state = saved?.get("state")
+                if (state != null && remap?.resolveClass(loader, "chessGameState")?.isInstance(state) == true) {
+                    bridge?.onRenderedState(state)
+                } else if (saved != null) bridge?.restoreAfterReload(saved)
+            }
+            log("hot reload complete; initialized=${initialized.get()}, waiting for companion reconnect")
+        } finally {
+            // Stable ids replace surviving hooks atomically. Also retire removed
+            // hooks after a partial initialization failure so they cannot retain old code.
+            for (old in param.oldHookHandles) if (!HookRuntime.owns(old.id)) old.unhook()
         }
     }
 }

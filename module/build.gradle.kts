@@ -1,18 +1,13 @@
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("com.android.library")
 }
 
 android {
     namespace = "io.github.a1175815821.chesspilot"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
-        applicationId = "io.github.a1175815821.chesspilot"
         minSdk = 27
-        targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
     }
     buildTypes {
         release {
@@ -23,13 +18,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+
 dependencies {
-    // Compile-time stub generated from tools/xapi (real classes are injected by LSPosed
-    // at runtime, so this must never be bundled into the APK).
-    compileOnly(files("libs/XposedBridgeApi-82-stub.jar"))
+    // Supplied by the framework in the target process; never package the API.
+    compileOnly("io.github.libxposed:api:102.0.0")
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Bake module/src/main/assets/remap.json into generated Kotlin (RemapTable) so the
@@ -65,7 +61,7 @@ val generateRemapTable by tasks.registering {
 
 android {
     sourceSets {
-        getByName("main").kotlin.srcDir(layout.buildDirectory.dir("generated/remap"))
+        getByName("main").kotlin.directories.add(layout.buildDirectory.dir("generated/remap").get().asFile.absolutePath)
     }
 }
 

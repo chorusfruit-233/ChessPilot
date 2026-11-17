@@ -16,6 +16,8 @@
     </queries>
 
     <application
+        android:name=".ChessPilotApp"
+        android:description="@string/module_description"
         android:label="ChessPilot"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"

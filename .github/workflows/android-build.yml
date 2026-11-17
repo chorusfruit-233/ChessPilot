@@ -1,0 +1,99 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      NET: nn-1a298aa575a0.nnue
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            **/*.gradle.kts
+            gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install Android build tools
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+          sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
+
+      - name: Fetch Stockfish 19 and verify NNUE
+        shell: bash
+        run: |
+          bash tools/fetch_stockfish.sh
+          printf '%s  %s\n' \
+            '1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2' \
+            "app/src/main/cpp/stockfish/src/$NET" | sha256sum --check
+
+      - name: Build APK, run Kotlin tests and lint
+        run: >-
+          ./gradlew :app:assembleRelease :app:testDebugUnitTest
+          :module:testDebugUnitTest :app:lintRelease
+          --max-workers=2 --console=plain
+
+      - name: Verify packaged API 102 module and CPU variants
+        run: >-
+          python3 tools/check_unified_apk.py
+          app/build/outputs/apk/release/app-release-unsigned.apk
+          --nnue "app/src/main/cpp/stockfish/src/$NET"
+
+      - name: Run mapping regression tests
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/remap-venv"
+          "$RUNNER_TEMP/remap-venv/bin/pip" install 'androguard==3.3.5'
+          "$RUNNER_TEMP/remap-venv/bin/python" -m unittest discover -s tools -v
+
+      - name: Run regression tests with real Stockfish
+        shell: bash
+        run: |
+          make -C app/src/main/cpp/stockfish/src -j2 build ARCH=x86-64
+          STOCKFISH_BIN="$GITHUB_WORKSPACE/app/src/main/cpp/stockfish/src/stockfish" \
+            python3 -m unittest discover -s pc -v
+
+      - name: Package APK, matching source and build provenance
+        run: python3 tools/ci_package.py --output dist/github
+
+      - name: Upload unsigned build for release signing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ChessPilot-unsigned-${{ github.sha }}
+          path: dist/github/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ChessPilot-reports-${{ github.sha }}
+          path: |
+            app/build/reports/
+            app/build/test-results/
+            module/build/reports/
+            module/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14

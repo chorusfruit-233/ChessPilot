@@ -77,6 +77,10 @@ class StockfishClient(private val context: Context) : EngineClient {
     @Volatile override var loadedNnue: String? = null
         private set
 
+    /** Reported by the native dispatcher after checking this device's HWCAP. */
+    @Volatile var cpuVariant: String? = null
+        private set
+
     /** Actual Threads/Hash sent at the last configure() — shown on the status screen. */
     @Volatile override var lastThreads: Int = 0
         private set
@@ -457,6 +461,9 @@ class StockfishClient(private val context: Context) : EngineClient {
                 while (true) {
                     val line = reader?.readLine() ?: break
                     Log.d(TAG, "<- $line")
+                    if (line.startsWith("info string ChessPilot CPU ")) {
+                        cpuVariant = line.substringAfter("info string ChessPilot CPU ").trim()
+                    }
                     if (line.startsWith(prefix)) { found = true; break }
                 }
             } catch (_: Throwable) {}

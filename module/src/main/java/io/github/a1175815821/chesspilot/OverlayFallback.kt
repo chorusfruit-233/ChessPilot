@@ -5,7 +5,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
@@ -25,16 +24,30 @@ import android.widget.FrameLayout
  */
 object OverlayFallback {
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = GenerationHandler(Looper.getMainLooper())
     private var added = false
     private var overlay: FrameLayout? = null
     private var arrowSpec: Pair<Pair<Float, Float>, Pair<Float, Float>>? = null
     private var arrowColor: Int = Color.argb(190, 255, 210, 0)
 
+    fun closeForReload(): Boolean {
+        mainHandler.close()
+        return GenerationHandler.onMainAndWait {
+            overlay?.takeIf { it.isAttachedToWindow }?.let { view ->
+                (BridgeAccess.context?.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+                    ?.removeViewImmediate(view)
+            }
+            overlay = null
+            arrowSpec = null
+            added = false
+        }
+    }
+
     fun ensure() {
         if (added) return
         val ctx = BridgeAccess.context ?: return
         mainHandler.post {
+            if (added) return@post
             try {
                 val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
                 val v = object : View(ctx) {
@@ -70,15 +83,14 @@ object OverlayFallback {
      * [ensure] again and re-adds a fresh window.
      */
     fun remove() {
-        val o = overlay
-        overlay = null
-        arrowSpec = null
-        added = false
-        if (o == null) return
         mainHandler.post {
+            val o = overlay ?: return@post
             try {
                 (BridgeAccess.context?.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
-                    ?.removeView(o)
+                    ?.removeViewImmediate(o)
+                overlay = null
+                arrowSpec = null
+                added = false
             } catch (_: Throwable) { }
         }
     }

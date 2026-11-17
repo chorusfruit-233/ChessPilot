@@ -56,15 +56,17 @@ python -m pip install androguard==3.3.5
 python tools/remap.py --apk /path/to/_6.105.2.apks
 python tools/remap.py --apk /path/to/_6.105.2.apks --check
 python -m unittest discover -s tools -v
-sh gradlew.sh :module:assembleDebug :module:assembleRelease :module:lintRelease
+sh gradlew.sh :app:assembleRelease :app:lintRelease :module:testDebugUnitTest
 ```
 
 The old script counted Androguard's descriptor spaces as parameter types, so it
 missed the controller/square signature, and passed `BytesIO` to `APK` without
 `raw=True`, so version extraction failed. Both are fixed. Unresolved or ambiguous
 interfaces now stop generation before writing; stale R8 names are not retained.
-The wrapper now uses Gradle's standalone wrapper JAR and a checksum-pinned 8.7
-distribution instead of an incomplete outer JAR and machine-specific Windows paths.
+The unified build uses Gradle 9.4.1 / AGP 9.2.1 / compileSdk 37 and the official
+libxposed API 102 (compile-only). `module` is an Android library packaged inside
+the `com.chessassist` APK. Target-object reflection no longer uses legacy Xposed
+helpers. See [API102_CPU.md](API102_CPU.md) for lifecycle and CPU dispatch details.
 
 ## Historical device findings: 6.85.7
 

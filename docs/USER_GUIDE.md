@@ -1,23 +1,21 @@
 # 使用说明（中文）
 
-当前适配多邻国 6.105.2（versionCode 2497）/ arm64，已通过 APK 静态接口核验和模块构建，尚待真机验证。两个包：`dist/app-release-test.apk`（伴侣 App：引擎+服务+状态页），
-`dist/module-release-test.apk`（LSPosed 模块：读棋盘局面、画箭头）。
+当前适配多邻国 6.105.2（versionCode 2497）/ arm64。**0.6.0 只需安装一个合包 APK**，包名 `com.chessassist`，包含 API 102 模块、引擎、服务和状态页。已通过主机回归、APK 构建及静态核验，尚待真机验证。
 
-仅做 6.105.2 的版本映射适配时可沿用旧伴侣 App；本次极限思考修复需更新伴侣 App 至 0.5.1。已适配的模块无需再次更新。使用电脑算力时，同时更新并重启 `pc/pc_engine.py`。
+覆盖安装需同一签名，原伴侣设置可沿用；独立旧模块须在框架中停用。保留 0.5.1 极限思考修复。使用电脑算力时，同时更新并重启 `pc/pc_engine.py`。
 
 > 英文技术文档见 `README.md` / `docs/REVERSE_ENGINEERING.md`。注意 README 里早期的
 > ContentProvider 轮询桥已废弃，当前是回环 TCP 桥（见下文“架构”）。
 
 ## 一、安装启用（只需做一次）
 
-1. 手机已 root，且装好 Magisk + Zygisk + LSPosed（本机三者都有）。
-2. 先装伴侣 App，打开点一次「启动引擎服务」（会弹通知权限，允许；悬浮窗按需授权，只影响备用横幅）。
-3. 再装 Hook 模块 → LSPosed 管理器里启用它 → 作用域只勾 `com.duolingo` → **重启手机**
-   （或至少杀掉多邻国重开；模块更新后也一样，必须让多邻国进程重建）。
+1. 手机已 root，且使用支持 **libxposed API 102** 的框架。旧版 LSPosed 不能加载本版。
+2. 安装合包 APK，打开点「启动引擎服务」（允许通知；悬浮窗按需授权，只影响备用横幅）。
+3. 框架管理器中停用原独立模块，启用包名为 `com.chessassist` 的 ChessPilot → 作用域只勾 `com.duolingo` → **首次迁移时结束多邻国运行再重开**。
 4. 打开多邻国下棋。App 状态页的 `Hook 连接` 应变成“已连接”，走一步出一条 `published:`，
    1 秒左右棋盘上出现黄色原生箭头。
 
-我们的两个 App **都不需要 root 授权**，LSPosed 弹的 root 请求是框架自己的，允许即可。
+ChessPilot 不需要单独的 root 授权。以后更新 API 102 合包会请求自动热重载；控制页也可手动重试已过期的模块。热重载失败/不支持时重开多邻国；更新 APK 后如引擎服务停止，重新启动服务。详细限制和验收步骤见 [API102_CPU.md](API102_CPU.md)。
 
 ## 二、状态页怎么看（App 主界面，每秒刷新，页面可上下滚）
 
@@ -28,6 +26,8 @@
 |---|---|
 | 引擎状态 | 运行中 / 启动中… / 已停止 / 启动失败 |
 | Hook 连接 | 已连接（socket 在线）= 对局端连上桥；“x 秒前收到局面”= 正常走棋中；**未连接** = LSPosed 那半边没上报（见排查表） |
+| 模块状态 | 框架名称/API 版本、热重载结果；与棋局 socket 连接是不同状态 |
+| 引擎 | 实际线程/Hash/深度及 CPU 路径：`NEON DotProd` 或 `ARMv8 NEON` |
 | NNUE | 已加载的神经网络（SF19 起应为 `embedded nn-1a298aa575a0.nnue`，单 V16 网） |
 | 当前 FEN | 最后一个收到的局面 |
 | 最佳招法 | 引擎给上一个局面的招（带我方胜率，杀棋会标 Mx） |
@@ -99,6 +99,8 @@
 | 现象 | 原因 / 做法 |
 |---|---|
 | `Hook 连接：未连接` | ① 模块没启用/没勾多邻国/没重启后重开多邻国；② 还没进棋局（不进对局就没有局面）；③ 多邻国升级导致类名变化（见“多邻国升级”） |
+| 框架看不到新模块 / API 版本不足 | 升级到明确支持 libxposed API 102 的框架；确认启用的是包名 `com.chessassist` 的合包 |
+| 热重载失败或一直没有新局面 | 结束多邻国运行再重开；同时检查 ChessPilot 引擎服务是否因 APK 更新而停止 |
 | 白方开局显示“等待对手走棋” | 两处跨局残留都已清：钩子侧开局重置 userColor，对局端 STARTPOS 跃迁重置去重记忆（之前连打两把开局，第二把必哑火——伪钩子连发两次开局验证通过）。若复现，把 LSPosed 日志里 `published:` 那行（带 `user=`）贴出来 |
 | 进对局多邻国闪退 | 已修（画箭头必须在主线程）。若复现，抓 tombstone 看崩溃线程名是不是 `duo-chess-bridg` |
 | 点启动 logcat 没日志 | MIUI 会吞 release 包的 INFO/DEBUG（E 可见），属系统行为；看 App 内状态页即可。非要看 logcat 请用 debug 包 |
@@ -144,9 +146,7 @@ mz6.e0() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
   最多等 1.2 秒——动画中途碰 Rive 是 wedging 头号嫌疑（手动自动都会卡、自动更多，
   因为还多点按）。ViewModel 回退反射扫描节流到每秒一次，不再给 UI 线程加压。
 - **颜色**：`getSymbol()` 实测返回大写 `B/W`，FEN 里是小写，边界统一转小写再比。
-- **Xposed 桩**：`tools/xapi` 的 `XposedBridge.hookMethod` 返回值必须是单个 `Unhook`
-  （真机 API 如此；写成 `Set` 编译能过、真机 `NoSuchMethodError`，且会中断整个初始化）。
-  桩改完要重打 `module/libs` 和 `tools/xapi` 下的两个 stub jar。
+- **libxposed API 102**：使用官方 `io.github.libxposed:api:102.0.0`（compileOnly），旧 `de.robv.android.xposed` 接口和自制桩已移除；元数据在 `META-INF/xposed/`，只有一个入口。
 - **横幅写屏纪律**：第二行颜色是状态的一部分——`showBestMove` 上色，`showThinking`/
   `showStatus`/`clear` 一律复位灰，`正在计算…` 不得带胜率色（B1）。
 - **clear 守卫名单**：`推荐/自动走棋中/等待走棋中/ChessPilot/局面停滞` 可替换
@@ -161,8 +161,8 @@ mz6.e0() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
   （SF19 起小网退役）。`tools/fetch_stockfish.sh` 带字节数校验，短了就重下——
   之前库里的 10MB 截断文件让引擎启动即崩，查了很久。注意 CDN 的 HEAD
   Content-Length 曾报过错数，以网名即哈希（sha256 前 12 位）为准验货。
-- **Stockfish 19**（2026-09-05 发布，+44 分）：`sf_19` tag + V16 单网；`src/universal/`
-  整目录排除在 NDK 构建外（多架构分发入口，arm64 直编不需要，编进去会炸）；
+- **Stockfish 19**：`sf_19` tag + V16 单网；采用上游 universal 的双命名空间/惰性初始化方案，
+  系统 HWCAP 检测后选择 ARMv8 NEON 或 ARMv8.2 DotProd，共享一份网络。NDK 不直接编译 `src/universal/` 中其他平台的入口；
   SF19 对坏 FEN 直接 `CRITICAL ERROR` 杀进程，`StockfishClient` 发前先做结构校验，
   防毒局面 crash-loop 打穿退避。
 
@@ -171,7 +171,7 @@ mz6.e0() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
 1. `python tools/remap.py --apk <新包>.apk`（也支持 `.apks`/`.apkm`，需 `pip install androguard==3.3.5`），重写
    `module/src/main/assets/remap.json`，同时更新类名、箭头清理方法和包版本。脚本会核对运行时仍使用的字段/方法；缺失或歧义会报错并保留原文件，不沿用旧混淆名。
    `python tools/remap.py --apk <同一安装包> --check` 可只校验、不写入。
-2. 重编模块（`generateRemapTable` 会自动烘进去）→ 签名 → 安装 → 杀掉多邻国重开。
+2. 重编 `:app:assembleRelease`（映射会自动烘入合包）→ 同密钥签名 → 安装。API 102 模块可热重载；新版本映射若不适用于当前多邻国，应先换到对应的多邻国版本。
 3. 看 LSPosed 日志：`remap table v<新版>` + `hooked ChessGameState`，再确认局面上报、箭头清理和黑白两方走棋方向；
    若出现 `!! ChessGameState not found` 就是映射没对上。
 
@@ -195,11 +195,19 @@ mz6.e0() 画原生箭头 ◄── BridgeClient ◄──Socket── bestmove �
 - Hook 触发是帧级的，正常对局只有局面变化时才有 `published:` 日志；`hb:` 心跳 10 秒一行常在；
   每对 `(fen,move)` 恰好一条 `arrow drawn`。
 - 改动多邻国行为违反其 ToS，请用小号折腾。
-- 构建：离线可用（`gradle-dist/gradle-8.7` + `gradle-wrapper.zip` 别删）；
-  `build/`、`app/.cxx` 是纯缓存，再编要从头跑 NDK（含 98MB 网嵌入，慢）。
+- 构建：Gradle 9.4.1、AGP 9.2.1、完整 JDK 17+、SDK 37、Build Tools 36.0.0、NDK 26.1.10909125。首次需联网下载依赖；
+  `build/`、`app/.cxx` 是缓存，删除后需重新编译 NDK（含 98MB 网络嵌入）。
   `work/`、`tools/__pycache__/`、手机 `/sdcard/*.png`、PC 暂存脚本都是用完即清的垃圾，别提交。
 
 ## 七、更新记录
+
+### 0.6.0（2026-11-17，合包/API 102/CPU 优化；未真机验证）
+
+- 模块改为 Android 库并打进 `com.chessassist`，只安装一个 APK，沿用伴侣包名和设置。
+- 全面迁移官方 libxposed API 102；启用自动 hot reload，增加框架状态及手动重试按钮。
+- 重载前停止回调、socket 和扫描线程，取消延迟绘制/点按并移除自建窗口；新代接回当前棋盘，稳定 Hook ID 原子替换。
+- Stockfish 按 CPU 能力选择通用 NEON 或 DotProd，启用 ThinLTO 和预取；网络只嵌入一份。新增真机固定深度对照测速脚本。
+- 保留 0.5.1 预测应招缓存/命中复用；热重载与 8 Elite 性能仍需真机验收。
 
 ### 0.5.1（2026-11-17，主机回归与 APK 构建通过，未真机验证）
 

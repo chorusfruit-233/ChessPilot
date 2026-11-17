@@ -40,6 +40,7 @@ object BridgeClient {
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
     private var sender: Thread? = null
+    @Volatile private var activeSocket: Socket? = null
 
     /**
      * The whole write holds [sendLock], and every close path takes the same lock first:
@@ -54,6 +55,34 @@ object BridgeClient {
     private val queue = LinkedBlockingQueue<JSONObject>(MAX_QUEUE)
 
     @Volatile private var lastSnapshot: JSONObject? = null
+
+    /** Fully retire this generation's socket readers/writers before allowing reload. */
+    fun stopForReload(): Boolean {
+        running.set(false)
+        val socket = activeSocket
+        // shutdown wakes blocking I/O without closing a file descriptor mid-write.
+        try { socket?.shutdownInput() } catch (_: Exception) { }
+        try { socket?.shutdownOutput() } catch (_: Exception) { }
+        if (out == null) try { socket?.close() } catch (_: Exception) { }
+        sender?.interrupt()
+        worker?.interrupt()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+        for (thread in listOfNotNull(sender, worker)) {
+            if (thread === Thread.currentThread()) continue
+            val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+            if (left > 0) try { thread.join(left) } catch (_: InterruptedException) { }
+        }
+        val stopped = sender?.isAlive != true && worker?.isAlive != true
+        if (stopped) {
+            sender = null
+            worker = null
+            activeSocket = null
+            out = null
+            lastSnapshot = null
+            queue.clear()
+        }
+        return stopped
+    }
 
     fun ensureStarted() {
         if (!running.compareAndSet(false, true)) return
@@ -148,6 +177,7 @@ object BridgeClient {
             var sock: Socket? = null
             try {
                 sock = Socket()
+                activeSocket = sock
                 sock.tcpNoDelay = true
                 sock.connect(InetSocketAddress("127.0.0.1", PORT), 3000)
                 MainHook.log("bridge connected to companion")
@@ -173,7 +203,9 @@ object BridgeClient {
                     try { dead.close() } catch (_: Throwable) {}
                 }
                 queue.clear()
+                activeSocket = null
             }
+            if (!running.get()) return
             try {
                 Thread.sleep(backoff)
             } catch (_: InterruptedException) {

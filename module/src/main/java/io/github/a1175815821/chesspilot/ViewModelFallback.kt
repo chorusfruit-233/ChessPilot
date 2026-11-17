@@ -1,11 +1,6 @@
 package io.github.a1175815821.chesspilot
 
-import android.os.Handler
 import android.os.HandlerThread
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 /**
  * Fallback hook layer when the R8-minified model classes change layout:
@@ -29,7 +24,8 @@ object ViewModelFallback {
     @Volatile private var lastScanAt: Long = 0
     @Volatile private var scanTarget: Any? = null
     private var bridgeRef: StateBridge? = null
-    private var scanHandler: Handler? = null
+    private var scanHandler: GenerationHandler? = null
+    private var scanThread: HandlerThread? = null
     private val scheduleLock = Any()
     private var scanScheduled = false
 
@@ -43,12 +39,12 @@ object ViewModelFallback {
         "([pnbrqkPNBRQK1-8]{1,8}/){7}[pnbrqkPNBRQK1-8]{1,8}\\s[wb]\\s(-|[KQkq]{1,4})(\\s(-|[a-h][36]))?(\\s\\d+)?(\\s\\d+)?"
     )
 
-    fun hook(lpparam: XC_LoadPackage.LoadPackageParam, remap: Remap, bridge: StateBridge) {
-        val loader = lpparam.classLoader
+    fun hook(loader: ClassLoader, bridge: StateBridge) {
         bridgeRef = bridge
         if (scanHandler == null) {
             val t = HandlerThread("duo-chess-vmscan").apply { isDaemon = true; start() }
-            scanHandler = Handler(t.looper)
+            scanThread = t
+            scanHandler = GenerationHandler(t.looper)
         }
         val candidates = listOf(
             "com.duolingo.feature.chess.match.ChessMatchSessionViewModel",
@@ -59,32 +55,45 @@ object ViewModelFallback {
         )
         var hooked = 0
         for (name in candidates) {
-            val clz = try { XposedHelpers.findClass(name, loader) } catch (_: Throwable) { continue }
+            val clz = try { Reflect.findClass(name, loader) } catch (_: ClassNotFoundException) { continue }
             for (m in clz.declaredMethods) {
                 if (m.parameterTypes.isNotEmpty()) continue
                 try {
-                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
+                    HookRuntime.after(m, "view-model") { _, result ->
                             // Frame-rate hot path on the UI thread: two volatile ops,
                             // nothing else. The throttle only bounds how OFTEN a scan
                             // is scheduled; the latest result is always what gets scanned.
                             val now = System.currentTimeMillis()
-                            if (now - lastScanAt < 1000) return
+                            if (now - lastScanAt < 1000) return@after
                             lastScanAt = now
-                            val r = param.result ?: return
+                            val r = result ?: return@after
                             scanTarget = r
                             synchronized(scheduleLock) {
-                                if (scanScheduled) return
+                                if (scanScheduled) return@after
                                 scanScheduled = true
                             }
                             scanHandler?.post(::runScan)
-                        }
-                    })
+                    }
                     hooked++
-                } catch (_: Throwable) { }
+                } catch (_: Exception) { }
             }
         }
         MainHook.log("ViewModelFallback hooked $hooked methods")
+    }
+
+    fun stop(): Boolean {
+        scanHandler?.close()
+        scanHandler = null
+        val thread = scanThread
+        thread?.quitSafely()
+        if (thread != null && thread !== Thread.currentThread()) {
+            try { thread.join(1500) } catch (_: InterruptedException) { }
+        }
+        scanThread = null
+        scanTarget = null
+        bridgeRef = null
+        synchronized(scheduleLock) { scanScheduled = false }
+        return thread?.isAlive != true
     }
 
     /** Runs on the scan HandlerThread. */
