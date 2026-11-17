@@ -214,6 +214,7 @@ def verify_runtime_layout(dexes, owners):
     """Check the fields/getters still read by StateBridge and ArrowPainter."""
     color = "L" + KEPT["playerColor"].replace(".", "/") + ";"
     contracts = {
+        "setupModel": ({"a": "Ljava/lang/String;", "b": "Ljava/util/List;", "c": "Z"}, []),
         "chessGameState": ({"a": owners["chessFen"], "c": owners["setupModel"], "d": color, "e": color,
                             "f": "Ljava/util/List;"}, []),
         "chessFen": ({"a": "Ljava/lang/String;", "b": color,

@@ -50,9 +50,11 @@ The controller no longer owns the Rive View directly; constructor hooks on the
 kept `app.rive.runtime.kotlin.RiveAnimationView` remain the view discovery path.
 
 For game lifecycle detection, the module reads the live getter `mz6.J()` and
-observes `mz6.O(nx5)` board setup. PvP resync uses the same setup method, so the
-same controller keeps its result. `k25.j(bd6)` supplies an explicit new mini
-match ID and can rearm play on the same controller.
+observes `mz6.O(nx5)` board setup. The setup hook publishes the opening with
+the new game ID. If the getter is unavailable, it can use the constructed
+`ox5` whose setup matches `nx5`, or the setup's starting FEN and move history.
+PvP resync uses the same setup method, so the same controller keeps its result.
+`k25.j(bd6)` supplies a new mini match ID and can rearm play on the same controller.
 
 | Live handler | Result data |
 |---|---|

@@ -51,6 +51,8 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 `0.6.2` 读取人机、PvP 和短局的结算事件，显示胜负及结束原因，取消本局尚未执行的自动走棋。新对局开始后继续按当前设置运行。
 
+`0.6.3` 保留开局初始化时取得的棋盘状态，修复 Hook 已连接、控制页却一直显示「等待对局」的问题。
+
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
 ## 🧪 适配环境

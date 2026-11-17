@@ -110,17 +110,17 @@ class MainHook : XposedModule() {
                 } catch (e: Exception) { log("hook controller getter failed: $e") }
             }
         }
-        fun setupBoard(controller: Any, miniMatchId: String? = null) {
-            if (stateBridge.onBoardSetup(controller, miniMatchId)) {
+        fun setupBoard(controller: Any, model: Any? = null, miniMatchId: String? = null) {
+            val state = readLiveState(controller, liveGetter)
+            if (stateBridge.onBoardSetup(controller, miniMatchId, model, state)) {
                 RiveViewFinder.onControllerCreated(controller)
-                Reflect.callMethod(controller, liveGetter)?.let { stateBridge.onRenderedState(controller, it) }
             }
         }
         try {
             val setupName = table.methodNames("setupBoard").single()
             val setup = table.resolveClass(loader, "setupModel") ?: return
             HookRuntime.after(type.getDeclaredMethod(setupName, setup), "board-setup") { chain, _ ->
-                chain.thisObject?.let { setupBoard(it) }
+                chain.thisObject?.let { setupBoard(it, model = chain.getArg(0)) }
             }
             val miniGame = table.resolveClass(loader, "miniGame") ?: return
             val miniStart = table.methodNames("miniGameStart").single()
@@ -130,9 +130,16 @@ class MainHook : XposedModule() {
                 val params = Reflect.getObjectField(game, "g") ?: return@after
                 val id = Reflect.getObjectField(params, "a") as? String ?: return@after
                 val controller = Reflect.getObjectField(game, "a") ?: return@after
-                setupBoard(controller, id)
+                setupBoard(controller, miniMatchId = id)
             }
         } catch (e: Exception) { log("hook board setup failed: $e") }
+    }
+
+    private fun readLiveState(controller: Any, getter: String): Any? = try {
+        Reflect.callMethod(controller, getter)
+    } catch (t: Throwable) {
+        log("live board read failed: $t")
+        null
     }
 
     private fun hookRiveViews(loader: ClassLoader) {
@@ -194,10 +201,12 @@ class MainHook : XposedModule() {
                     RiveViewFinder.onControllerCreated(validController)
                 }
                 (saved?.get("view") as? View)?.let { RiveViewFinder.noteCtorInstance("hot-reload", it) }
-                val state = saved?.get("state")
-                if (validController != null && state != null &&
-                    remap?.resolveClass(loader, "chessGameState")?.isInstance(state) == true) {
-                    bridge?.onRenderedState(validController, state)
+                if (validController != null) {
+                    val getter = remap?.methodNames("liveState")?.singleOrNull()
+                    val state = getter?.let { readLiveState(validController, it) } ?: saved?.get("state")
+                    if (state != null && remap?.resolveClass(loader, "chessGameState")?.isInstance(state) == true) {
+                        bridge?.onRenderedState(validController, state)
+                    }
                 }
             }
             log("hot reload complete; initialized=${initialized.get()}, waiting for companion reconnect")

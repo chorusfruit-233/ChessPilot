@@ -14,11 +14,14 @@ import java.util.WeakHashMap
 class StateBridge {
 
     private data class Board(val id: String = UUID.randomUUID().toString(), val fen: String? = null, val end: GameEnd? = null)
+    private data class ConstructedState(val setup: Any, val state: Any)
+
     @Volatile private var board = Board()
     val lastFen: String? get() = board.fen
     val gameId: String get() = board.id
     private var controller: Any? = null
     private var setup: Any? = null
+    private var constructedState: ConstructedState? = null
     private var miniMatchId: String? = null
     private val retiredControllers = WeakHashMap<Any, Unit>()
 
@@ -36,27 +39,41 @@ class StateBridge {
 
     private val lock = Any()
 
-    /** A recreated board or an explicit mini match start starts a new game. */
-    fun onBoardSetup(owner: Any, matchId: String? = null): Boolean = synchronized(lock) {
+    /** Commit the board after Duolingo completes setup, using the position it just built. */
+    fun onBoardSetup(
+        owner: Any, matchId: String? = null, model: Any? = null, liveState: Any? = null,
+    ): Boolean = synchronized(lock) {
         if (retiredControllers.containsKey(owner)) return@synchronized false
-        if (controller === owner && (matchId == null || matchId == miniMatchId)) {
-            return@synchronized true // An in-game resync can reuse this controller.
+        val sameController = controller === owner
+        val newGame = !sameController || (matchId != null && matchId != miniMatchId)
+        val boardSetup = model ?: setup.takeIf { sameController }
+        if (newGame) {
+            if (!sameController) controller?.let { retiredControllers[it] = Unit }
+            controller = owner
+            miniMatchId = matchId
+            board = Board()
+            lastUserColor = null
+            lastTurnColor = null
+            lastMoves = emptyList()
+            lastRenderProcessAt = 0
+            BridgeAccess.lastState = null
+            BridgeAccess.lastUserColor = null
+            BridgeAccess.boardController = owner
+            CommandLoop.cancelPendingMove()
+            BridgePublisher.resetPosition()
         }
-        if (controller !== owner) controller?.let { retiredControllers[it] = Unit }
-        controller = owner
-        miniMatchId = matchId
-        setup = null
-        board = Board()
-        lastUserColor = null
-        lastTurnColor = null
-        lastMoves = emptyList()
-        lastRenderProcessAt = 0
-        BridgeAccess.lastState = null
-        BridgeAccess.lastUserColor = null
-        BridgeAccess.boardController = owner
-        CommandLoop.cancelPendingMove()
-        BridgePublisher.resetPosition()
-        publishSnapshot()
+        setup = boardSetup
+        if (board.end == null) {
+            // The state constructor runs inside native setup, before this hook.
+            val state = liveState ?: constructedState?.takeIf {
+                board.fen == null && it.setup === boardSetup
+            }?.state
+            if (state != null) onGameState(state, "render")
+            if (board.fen == null) {
+                if (boardSetup != null) seedFromSetup(boardSetup)
+                if (newGame || board.fen != null) publishSnapshot()
+            }
+        }
         true
     }
 
@@ -99,10 +116,11 @@ class StateBridge {
 
     /** Called from the ChessGameState constructor hook. */
     fun onGameState(state: Any, src: String = "ctor") = synchronized(lock) {
-        if (board.end != null && src != "render") return@synchronized
         BridgePublisher.noteTrigger(src)
         try {
             val stateSetup = Reflect.getObjectField(state, "c")
+            if (src == "ctor" && stateSetup != null) constructedState = ConstructedState(stateSetup, state)
+            if (board.end != null) return@synchronized
             if (src != "render" && setup != null && setup !== stateSetup) return@synchronized
             val fen = extractFen(state) ?: return@synchronized
             val user = extractColor(state, "d")   // d = userColor
@@ -190,10 +208,10 @@ class StateBridge {
 
     @Volatile private var lastRenderProcessAt: Long = 0
 
-    /** Called when the Rive controller has rendered the state (g() hook). */
+    /** Called with the board controller's current live state. */
     fun onRenderedState(owner: Any, state: Any): Boolean = synchronized(lock) {
-        if (controller == null && !onBoardSetup(owner)) return@synchronized false
-        if (controller !== owner) return@synchronized false
+        if (controller == null) return@synchronized onBoardSetup(owner, liveState = state)
+        if (controller !== owner || board.end != null) return@synchronized false
         // Render polling can fire dozens of times per second on the UI thread, each
         // doing full reflection extraction. Throttle the heavy part: states change
         // far slower than frames (ctor path is unthrottled and covers new states).
@@ -202,6 +220,28 @@ class StateBridge {
         lastRenderProcessAt = now
         onGameState(state, "render") // re-publish: rendered state is authoritative for the UI
         board.end == null
+    }
+
+    /** The setup contains an explicit FEN, or defaults to startpos for an empty history. */
+    private fun seedFromSetup(model: Any) {
+        try {
+            val history = Reflect.getObjectField(model, "b") as? List<*> ?: return
+            val fen = Reflect.getObjectField(model, "a") as? String
+                ?: if (history.isEmpty()) STARTPOS else return
+            val parts = fen.split(' ')
+            if (parts.size != 6 || parts[0].count { it == '/' } != 7) return
+            val turn = parts[1].lowercase()
+            if (turn != "w" && turn != "b") return
+            val user = if (Reflect.getBooleanField(model, "c")) turn else if (turn == "w") "b" else "w"
+            board = board.copy(fen = fen)
+            lastUserColor = user
+            lastTurnColor = turn
+            lastMoves = moveUcis(history)
+            lastUpdateAt = System.currentTimeMillis()
+            BridgeAccess.lastUserColor = user
+        } catch (t: Throwable) {
+            MainHook.log("board setup position unavailable: $t")
+        }
     }
 
     /** Called by ViewModelFallback when a FEN-shaped string is mined from kept-name classes. */
@@ -240,14 +280,20 @@ class StateBridge {
     private fun extractMoves(state: Any): List<String> {
         return try {
             val list = Reflect.getObjectField(state, "f") as? List<*> ?: return emptyList()
-            list.mapNotNull { mv ->
-                if (mv == null) return@mapNotNull null
-                try { Reflect.callMethod(mv, "b") as? String } catch (_: Throwable) { null }
-            }
+            moveUcis(list)
         } catch (_: Throwable) { emptyList() }
+    }
+
+    private fun moveUcis(moves: List<*>): List<String> = moves.mapNotNull { move ->
+        if (move == null) return@mapNotNull null
+        try { Reflect.callMethod(move, "b") as? String } catch (_: Throwable) { null }
     }
 
     private fun bool(obj: Any, field: String): Boolean = try {
         Reflect.getBooleanField(obj, field)
     } catch (_: Throwable) { false }
+
+    companion object {
+        private const val STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    }
 }
