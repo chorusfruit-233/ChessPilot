@@ -115,6 +115,8 @@ python tools/check_unified_apk.py app/build/outputs/apk/release/app-release-unsi
 
 本地引擎按系统 CPU 能力选择 ARMv8 NEON 或 ARMv8.2 DotProd；骁龙 8 Elite 正常会走 DotProd。两套代码共享一份内嵌 NNUE，并启用 ThinLTO 与预取。未增加 GPU/NPU 后端，提速幅度需在手机上测量：`python tools/bench_android_cpu.py --output cpu-bench.json`。
 
+GitHub Actions 会在 `master` 更新后构建并上传未签名 APK、完整对应源码及验证报告；签名和 Release 发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+
 多邻国升级导致混淆名变了？不用慌：`tools/remap.py` 可以从新 APK 再生映射表，流程见逆向笔记。
 
 仓库里不进 git 的东西（构建产物、Stockfish 源码、`dist/`、多邻国 APK）全部可按上述步骤再生。
