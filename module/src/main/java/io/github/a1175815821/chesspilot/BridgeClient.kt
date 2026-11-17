@@ -55,6 +55,7 @@ object BridgeClient {
     private val queue = LinkedBlockingQueue<JSONObject>(MAX_QUEUE)
 
     @Volatile private var lastSnapshot: JSONObject? = null
+    private val snapshotLock = Any()
 
     /** Fully retire this generation's socket readers/writers before allowing reload. */
     fun stopForReload(): Boolean {
@@ -96,16 +97,24 @@ object BridgeClient {
         }
     }
 
-    fun sendPosition(fen: String, userColor: String?, turnColor: String?, moves: List<String>) {
+    fun sendPosition(
+        fen: String?, userColor: String?, turnColor: String?, moves: List<String>,
+        gameId: String?, end: GameEnd?,
+    ) {
         val obj = JSONObject().apply {
             put("t", "position")
-            put("fen", fen)
+            put("fen", fen ?: "")
             put("user", userColor ?: "")
             put("turn", turnColor ?: "")
             put("moves", moves.joinToString(" "))
+            put("game", gameId)
+            put("end", end?.reason)
+            put("outcome", end?.outcome)
         }
-        lastSnapshot = obj
-        enqueue(obj)
+        synchronized(snapshotLock) {
+            lastSnapshot = obj
+            enqueue(obj)
+        }
     }
 
     fun sendAck(uci: String) {
@@ -182,9 +191,11 @@ object BridgeClient {
                 sock.connect(InetSocketAddress("127.0.0.1", PORT), 3000)
                 MainHook.log("bridge connected to companion")
                 val o = sock.getOutputStream()
-                synchronized(sendLock) { out = o }
-                // Flush the latest position so analysis resumes immediately.
-                lastSnapshot?.let { enqueue(it) }
+                synchronized(snapshotLock) {
+                    synchronized(sendLock) { out = o }
+                    // Reconnect flush and live snapshots must stay in order.
+                    lastSnapshot?.let { enqueue(it) }
+                }
                 backoff = 1000L
                 readLoop(sock)
             } catch (t: Throwable) {

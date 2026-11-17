@@ -320,8 +320,10 @@ class StockfishClient(private val context: Context) : EngineClient {
         synchronized(writeLock) {
             try { p?.outputStream?.write("quit\n".toByteArray()); p?.outputStream?.flush() } catch (_: Throwable) {}
         }
-        try { r?.close() } catch (_: Throwable) {}
+        // Terminate first, so close() can acquire BufferedReader's lock even
+        // while analyse/ponder is blocked inside readLine().
         try { p?.destroy() } catch (_: Throwable) {}
+        try { r?.close() } catch (_: Throwable) {}
     }
 
     private fun send(cmd: String) {

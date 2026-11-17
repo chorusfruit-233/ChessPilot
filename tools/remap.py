@@ -214,7 +214,7 @@ def verify_runtime_layout(dexes, owners):
     """Check the fields/getters still read by StateBridge and ArrowPainter."""
     color = "L" + KEPT["playerColor"].replace(".", "/") + ";"
     contracts = {
-        "chessGameState": ({"a": owners["chessFen"], "d": color, "e": color,
+        "chessGameState": ({"a": owners["chessFen"], "c": owners["setupModel"], "d": color, "e": color,
                             "f": "Ljava/util/List;"}, []),
         "chessFen": ({"a": "Ljava/lang/String;", "b": color,
                       **{key: "Z" for key in "cdef"}, "g": "Ljava/lang/String;",
@@ -224,12 +224,56 @@ def verify_runtime_layout(dexes, owners):
     }
     for key, (fields, methods) in contracts.items():
         cls = find_class(dexes, owners[key])
-        actual_fields = {f.get_name(): f.get_descriptor() for f in cls.get_fields()}
-        actual_methods = {(m.get_name(), m.get_descriptor().replace(" ", ""))
-                          for m in cls.get_methods()}
-        if any(actual_fields.get(name) != kind for name, kind in fields.items()) or \
-                any(method not in actual_methods for method in methods):
-            raise ValueError(f"{key} layout changed; update the runtime accessors before remapping")
+        verify_layout(cls, key, fields, methods)
+
+
+def verify_layout(cls, role, fields, methods):
+    actual_fields = {f.get_name(): f.get_descriptor() for f in cls.get_fields()}
+    actual_methods = {(m.get_name(), m.get_descriptor().replace(" ", ""))
+                      for m in cls.get_methods()}
+    if any(actual_fields.get(name) != kind for name, kind in fields.items()) or \
+            any(method not in actual_methods for method in methods):
+        raise ValueError(f"{role} layout changed; update the runtime accessors before remapping")
+
+
+def add_game_lifecycle(dexes, remap, ctrl, owners):
+    """Verified live-match interfaces for 6.105.2. Re-audit when R8 moves a handler."""
+    outcome = "Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;"
+    reason = "Lcom/duolingo/data/chess/match/network/ChessMatchEndCondition;"
+    client_reason = "Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;"
+    bot = "Lcom/duolingo/feature/chess/match/j;"
+    session = "Lr37;"
+    roles = {
+        "chessSession": (session, {}, {"sessionController": ("l", "()" + ctrl),
+                                      "sessionCleared": ("onCleared", "()V")}),
+        "botSession": (bot, {}, {
+            "botGameEnd": ("I", f"({bot}{outcome}Ljava/lang/Integer;Z{reason}{client_reason}Lnq8;I)Ljava/lang/Object;"),
+            "botExit": ("N", f"({client_reason})V"),
+        }),
+        "pvpSession": ("Ltr6;", {"L": "Lcom/duolingo/data/chess/match/network/ChessMatchPlayerColor;"},
+                       {"pvpGameEnd": ("G", "(Lar6;Lpq8;)Ljava/lang/Object;")}),
+        "miniGame": ("Lk25;", {"a": ctrl, "g": "Ld25;"}, {
+            "miniGameStart": ("j", "(Lbd6;)V"), "miniGameEnd": ("m", f"({outcome}{reason})V"),
+        }),
+        "miniSession": ("Lle6;", {"z": "Lid6;"}, {"miniSessionEnd": ("F", "()V")}),
+    }
+    for key, (desc, fields, methods) in roles.items():
+        cls = find_class(dexes, desc)
+        verify_layout(cls, key, fields, methods.values())
+        if key in {"botSession", "pvpSession", "miniSession"} and cls.get_superclassname() != session:
+            raise ValueError(f"{key} no longer owns the expected live board")
+        remap["classes"][key] = [short(desc)]
+        remap["methods"].update({role: [method[0]] for role, method in methods.items()})
+
+    verify_layout(find_class(dexes, "Lar6;"), "PvP game end", {
+        "a": "Lcom/duolingo/data/chess/match/network/ChessMatchOutcome;", "b": reason,
+    }, [])
+    verify_layout(find_class(dexes, "Ld25;"), "mini match identity", {"a": "Ljava/lang/String;"}, [])
+    verify_layout(find_class(dexes, "Lid6;"), "mini match clock", {"j": "I"}, [])
+    verify_layout(find_class(dexes, ctrl), "live board", {}, [
+        ("J", "()" + owners["chessGameState"]), ("O", f"({owners['setupModel']})V"),
+    ])
+    remap["methods"].update({"liveState": ["J"], "setupBoard": ["O"]})
 
 
 def main():
@@ -271,6 +315,7 @@ def main():
     remap["classes"]["boardController"] = [short(ctrl)]
     controller = find_class(dexes, ctrl)
     remap["methods"] = {"clearArrows": [find_clear_method(controller, owners["resetArrows"])]}
+    add_game_lifecycle(dexes, remap, ctrl, owners)
 
     # ShowArrow's third constructor parameter is the piece type, even when its
     # toString has been optimized away. Do not carry stale names into a new APK:

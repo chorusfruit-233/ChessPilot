@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 
-from pc_engine import Engine
+from pc_engine import Engine, handle_conn
 
 
 SOURCE = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
@@ -91,6 +91,25 @@ class PonderIntegrationTests(unittest.TestCase):
         self.engine.restart()
         self.prepare(27)
         self.assertEqual(27, self.engine.ponderhit(28)["id"])
+
+    def test_a_closed_phone_connection_retires_its_active_analysis(self):
+        server, phone = socket.socketpair()
+        worker = threading.Thread(target=handle_conn, args=(server, ("test", 0), self.engine), daemon=True)
+        worker.start()
+        try:
+            request = {"t": "analyse", "id": 42, "fen": SOURCE, "depth": 40}
+            phone.sendall((json.dumps(request) + "\n").encode())
+            deadline = time.monotonic() + 5
+            while "go depth 40" not in self.commands and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIn("go depth 40", self.commands)
+            phone.close()
+            worker.join(3)
+            self.assertFalse(worker.is_alive(), "search kept running after the phone disconnected")
+        finally:
+            phone.close()
+            if worker.is_alive():
+                server.close()
 
 
 @unittest.skipUnless(BINARY, "set STOCKFISH_BIN to run real-engine tests")

@@ -5,6 +5,7 @@ import android.util.Log
 import com.chessassist.BridgeServer
 import com.chessassist.BridgeSettings
 import com.chessassist.OverlayManager
+import io.github.a1175815821.chesspilot.GameEnd
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -42,14 +43,14 @@ object EngineLoop {
     const val STATE_FAILED = "failed"
 
     private val running = AtomicBoolean(false)
-    private var client: EngineClient? = null
+    @Volatile private var client: EngineClient? = null
     /**
      * Ponder's own engine process (P0 isolation): ponder search/ponderhit/stop
      * traffic NEVER touches [client]'s stdin/stdout. Lifecycle mirrors the
      * main client (lazy start on first ponder, dropped on stop/restart/kill).
      * Guarded by worker-thread confinement, like [client].
      */
-    private var ponderClient: EngineClient? = null
+    @Volatile private var ponderClient: EngineClient? = null
     private var appContext: Context? = null
     private var worker: Thread? = null
 
@@ -110,12 +111,20 @@ object EngineLoop {
     /** No new position for this long => banner/status say so explicitly. */
     private const val STALE_AFTER_MS = 45_000L
 
-    @Volatile private var pendingFen: String? = null
-    @Volatile private var pendingUserColor: String? = null
-    @Volatile private var pendingTurnColor: String? = null
-    /** Move history for the pending position (ponder-hit matching). */
-    @Volatile private var pendingMoves: List<String> = emptyList()
+    private data class Position(
+        val fen: String? = null, val user: String? = null, val turn: String? = null,
+        val moves: List<String> = emptyList(), val gameId: String? = null, val end: GameEnd? = null,
+    )
+
+    @Volatile private var pending = Position()
     private val pendingLock = Any()
+    private val retiredGames = LinkedHashSet<String>()
+    private var analysingClient: EngineClient? = null
+
+    private fun isPlayable(position: Position): Boolean {
+        val latest = pending
+        return latest.gameId == position.gameId && latest.fen == position.fen && latest.end == null
+    }
 
     // ---------------------------------------------------------- ponder -----
     // Think on the opponent's time: while it's their turn, search our reply to
@@ -162,7 +171,11 @@ object EngineLoop {
     fun start(context: Context) {
         if (!running.compareAndSet(false, true)) return
         appContext = context.applicationContext
-        engineState = STATE_STARTING
+        synchronized(pendingLock) {
+            val end = pending.end
+            engineState = if (end == null) STATE_STARTING else STATE_RUNNING
+            if (end != null) OverlayManager.showStatus(endTitle(end), endDetail(end))
+        }
         lastError = null
         note("正在启动引擎…")
         val gen = ++workerGen
@@ -236,12 +249,13 @@ object EngineLoop {
      * is latest-only, so a dropped push just means "same as displayed" — the
      * hook repaints from its stored pair on every render anyway.
      */
-    private fun pushPonderGuessOrClear(fen: String, pred: String?) {
+    private fun pushPonderGuessOrClear(position: Position, fen: String, pred: String?) = synchronized(pendingLock) {
+        if (!isPlayable(position)) return@synchronized
         val key = pred?.let { "$fen|$it" }
-        if (key == lastPushedPonderKey) return
+        if (key == lastPushedPonderKey) return@synchronized
         lastPushedPonderKey = key
-        if (key != null) BridgeServer.pushPonderGuess(pred!!, fen)
-        else BridgeServer.pushClearPonder()
+        if (pred != null) BridgeServer.pushPonderGuess(pred, fen, position.gameId)
+        else BridgeServer.pushClearPonder(position.gameId)
     }
 
     /**
@@ -265,24 +279,26 @@ object EngineLoop {
      *   mid-handshake — creating the process without this check orphans it
      *   (nobody ever stops it again). Mirrors the main-client guard in runLoop.
      */
-    private fun maybePonder(fen: String, moves: List<String>, gen: Long) {
+    private fun maybePonder(position: Position, fen: String, gen: Long) {
+        val moves = position.moves
         try {
+            if (!isPlayable(position)) return
             if (!BridgeSettings.ponderEnabled) {
                 ensurePonderStopped()
-                pushPonderGuessOrClear(fen, null)
+                pushPonderGuessOrClear(position, fen, null)
                 return
             }
             val r = lastPonderMove
             if (r == null) {
                 ensurePonderStopped()
-                pushPonderGuessOrClear(fen, null)
+                pushPonderGuessOrClear(position, fen, null)
                 return
             }
             // Push the guess FIRST, before the (possibly slow: 1-3 s first-time
             // engine handshake) ponder job spins up. The prediction is known
             // already; the red arrow must not wait for the search. Key-gated,
             // so this costs one message per (fen, prediction).
-            pushPonderGuessOrClear(fen, r)
+            pushPonderGuessOrClear(position, fen, r)
             // A finished result is still useful. Do not restart and erase it
             // every 200 ms while the opponent is deciding.
             val existing = ponderSession
@@ -299,13 +315,9 @@ object EngineLoop {
             if (pc == null || !pc.isRunning()) {
                 if (System.currentTimeMillis() - lastPonderStartFailAt < PONDER_START_RETRY_MS) return
                 pc = createPonderClient(gen) ?: return
-                ponderClient = pc
             }
             val c = pc
-            if (!running.get() || gen != workerGen) return
             val session = PonderSession(fen, r, moves)
-            ponderSession = session
-            lastPonderHit = null
             val movetime = if (c is RemoteEngineClient) BridgeSettings.remoteMovetimeMs
                 else BridgeSettings.movetimeMs
             val depth = if (c is RemoteEngineClient) BridgeSettings.remoteDepth
@@ -324,8 +336,20 @@ object EngineLoop {
                     Log.w(TAG, "ponder thread died: ${t.message?.take(80)}")
                 }
             }, "ponder").apply { isDaemon = true }
-            if (running.get() && gen == workerGen && !session.stopFlag.get()) session.thread?.start()
-            else ensurePonderStopped()
+            val started = synchronized(pendingLock) {
+                if (!running.get() || gen != workerGen || pending.gameId != position.gameId || pending.end != null) {
+                    false
+                } else {
+                    // Our turn may have arrived during the handshake. Starting the
+                    // prepared search still helps when the prediction just landed.
+                    ponderClient = c
+                    ponderSession = session
+                    lastPonderHit = null
+                    session.thread?.start()
+                    true
+                }
+            }
+            if (!started) c.stop()
         } catch (_: Throwable) {
         }
     }
@@ -339,7 +363,7 @@ object EngineLoop {
      * Completed PVs are cached before bestmove; hits use them immediately.
      */
     private fun tryConsumePonder(
-        fen: String, moves: List<String>,
+        position: Position, fen: String, moves: List<String>,
     ): BestMove? {
         try {
             val session = ponderSession ?: return null
@@ -382,8 +406,7 @@ object EngineLoop {
             if (res != null && matched) stopPonderSearch(session)
             // Check again AFTER stopping/joining: a correction can arrive there
             // too. The cache survives a stopped reader until explicitly consumed.
-            val fresh = synchronized(pendingLock) { pendingFen }
-            if (fresh != null && fresh != fen) {
+            if (!isPlayable(position)) {
                 Log.i(TAG, "ponder handoff deferred to newer position")
                 return null
             }
@@ -567,19 +590,119 @@ object EngineLoop {
     @Volatile private var settleFen: String? = null
     @Volatile private var settleSince: Long = 0
 
-    /** Called by BridgeProvider whenever the hook publishes a position. */
-    fun onPosition(fen: String, userColor: String?, turnColor: String?, moves: List<String>) {
-        lastPositionAt = System.currentTimeMillis()
-        lastPositionFen = fen
-        lastUserColor = userColor?.lowercase()
-        lastTurnColor = fen.split(' ').getOrNull(1)?.lowercase()?.takeIf { it == "w" || it == "b" }
-            ?: turnColor?.lowercase()
-        synchronized(pendingLock) {
-            pendingFen = fen
-            pendingUserColor = userColor
-            pendingTurnColor = turnColor
-            pendingMoves = moves
+    /** A terminal snapshot applies to its entire game, including later render updates. */
+    fun onPosition(
+        fen: String?, userColor: String?, turnColor: String?, moves: List<String>,
+        gameId: String? = null, end: GameEnd? = null,
+    ) = receivePosition(Position(fen, userColor, turnColor, moves, gameId, end))
+
+    private fun receivePosition(position: Position, fromEngine: Boolean = false) {
+        val enginesToStop = synchronized(pendingLock) {
+            val previous = pending
+            val gameId = position.gameId
+            val newGame = gameId != previous.gameId
+            if (fromEngine && !isPlayable(position)) return
+            if ((gameId == null && previous.gameId != null) || gameId in retiredGames) return
+            if (newGame) {
+                previous.gameId?.let(retiredGames::add)
+                if (retiredGames.size > 64) retiredGames.remove(retiredGames.first())
+            }
+
+            // Legacy senders have no identity. Their only explicit game boundary
+            // is a return to startpos. Current modules always send a game ID.
+            val legacyStart = gameId == null && position.fen == STARTPOS_FEN && previous.fen != STARTPOS_FEN
+            val priorEnd = if (newGame || legacyStart) null else previous.end
+            val end = position.end?.let { priorEnd?.followedBy(it) ?: it } ?: priorEnd
+            val fen = position.fen ?: previous.fen.takeUnless { newGame }
+            pending = position.copy(fen = fen, end = end)
+            lastPositionAt = System.currentTimeMillis()
+            lastPositionFen = fen
+            lastUserColor = position.user?.lowercase()
+            lastTurnColor = fen?.split(' ')?.getOrNull(1)?.lowercase()?.takeIf { it == "w" || it == "b" }
+                ?: position.turn?.lowercase()
+
+            val endedNow = end != null && priorEnd == null
+            val cancelled = if (newGame || endedNow) {
+                clearRecommendation()
+                currentFen = fen
+                ponderSession?.cancel()
+                ponderSession = null
+                BridgeServer.discardQueuedMoves()
+                val active = analysingClient
+                analysingClient = null
+                if (client === active) client = null
+                listOfNotNull(active, ponderClient).also { ponderClient = null }
+            } else emptyList()
+
+            if (end != null) {
+                currentFen = fen
+                if (running.get()) engineState = STATE_RUNNING
+                if (end != priorEnd) {
+                    val title = endTitle(end)
+                    val detail = endDetail(end)
+                    note(listOf(title, detail).filter(String::isNotEmpty).joinToString(" · "))
+                    OverlayManager.showStatus(title, detail)
+                    if (fromEngine && fen != null) BridgeServer.pushGameEnd(fen, gameId, end)
+                    BridgeServer.pushClear(gameId)
+                }
+            } else if (newGame && previous.end != null) {
+                OverlayManager.showStatus("ChessPilot", "等待新对局…")
+            }
+            cancelled
         }
+        // Socket/process teardown can block. Keep snapshot and command gates live.
+        for (engine in enginesToStop) {
+            try { engine.stop() } catch (e: Exception) { Log.w(TAG, "game end cleanup: $e") }
+        }
+    }
+
+    private fun clearRecommendation() {
+        analysedFen = null
+        lastPushedMove = null
+        lastPushedFen = null
+        lastBestMove = null
+        lastBestMoveAt = 0
+        lastScoreCp = null
+        lastScoreStm = null
+        lastScoreUser = null
+        lastDepth = 0
+        lastPonderMove = null
+        lastPonderHit = null
+        lastPushedPonderKey = null
+        lastResultFromPonder = false
+        lastError = null
+    }
+
+    private fun endTitle(end: GameEnd) = if (end.reason == "LEFT_BOARD") "已离开对局" else "对局结束"
+
+    private fun endDetail(end: GameEnd): String {
+        val reason = when (end.reason) {
+            "CHECKMATE" -> "将死"
+            "TIMEOUT" -> "超时"
+            "TIMEOUT_VS_INSUFFICIENT_MATERIAL" -> "超时且对方子力不足"
+            "RESIGNATION" -> "认输"
+            "ABANDONED" -> "弃局"
+            "DISCONNECTION" -> "断线"
+            "AGREEMENT" -> "协议和棋"
+            "STALEMATE" -> "逼和"
+            "REPETITION" -> "局面重复"
+            "INSUFFICIENT_MATERIAL" -> "子力不足"
+            "FIFTY_MOVES" -> "五十回合规则"
+            "SEVENTY_FIVE_MOVES" -> "七十五回合规则"
+            "NO_LEGAL_MOVES" -> "无合法着法"
+            "COMPLETED", "LEFT_BOARD" -> ""
+            else -> end.reason
+        }
+        val outcome = when (end.outcome) {
+            "WIN" -> "胜利"
+            "LOSS" -> "失败"
+            "DRAW" -> "和棋"
+            "RESIGN" -> "认输"
+            "WHITE" -> "白方胜"
+            "BLACK" -> "黑方胜"
+            else -> ""
+        }
+        return listOf(outcome, reason).filter(String::isNotEmpty).distinct().joinToString(" · ")
     }
 
     fun onArrowAck(uci: String) {
@@ -588,7 +711,7 @@ object EngineLoop {
     }
 
     /** Called by [BridgeServer] when the hook (re)connects over loopback TCP. */
-    fun onHookConnected() {
+    fun onHookConnected() = synchronized(pendingLock) {
         note("对局端已连接（socket 在线）")
         // Hook process restarted (or first connect): its paint/confirm state is
         // gone while our dedupe keys persist. Force-resend so current arrows
@@ -600,8 +723,8 @@ object EngineLoop {
             lastPushedPonderKey = null
             val m = lastPushedMove
             val f = lastPushedFen
-            if (m != null && f != null && f == analysedFen) {
-                BridgeServer.pushBestmove(m, f, false, BridgeSettings.autoPlayDelayMs, lastResultFromPonder)
+            if (pending.end == null && m != null && f != null && f == analysedFen && f == pending.fen) {
+                BridgeServer.pushBestmove(m, f, false, BridgeSettings.autoPlayDelayMs, lastResultFromPonder, pending.gameId)
             }
         } catch (_: Throwable) {
         }
@@ -621,7 +744,8 @@ object EngineLoop {
      * stale annotator (silent on the user's turn) can overwrite it. The next
      * fresh analysis replaces it naturally. Event log kept for diagnostics.
      */
-    fun onNeedHelp(code: String, uci: String) {
+    fun onNeedHelp(code: String, uci: String) = synchronized(pendingLock) {
+        if (pending.end != null || lastPushedMove != uci || lastPushedFen != pending.fen) return@synchronized
         if (code == "promotion") {
             note("升变请手动选皇后：$uci")
             OverlayManager.showStatus("升变请手动选皇后", uci)
@@ -652,6 +776,7 @@ object EngineLoop {
      */
     fun ponderLine(): String {
         if (!BridgeSettings.ponderEnabled) return "关"
+        if (pending.end != null) return "本局已停止"
         val session = ponderSession
         val best = session?.result
         val hit = lastPonderHit
@@ -686,61 +811,40 @@ object EngineLoop {
      * engine's predicted reply ([BestMove.ponder]) for the next ponder round.
      * Caller owns generation checks around this (see loop).
      */
-    private fun publishBest(fen: String, stm: String?, user: String?, best: BestMove, ponderHit: Boolean) {
-        // NOTE: the loop-local lastAnalysedFen is set by the caller (it shadows
-        // nothing here — this function cannot see runLoop's locals).
-        // Terminal position (side to move has no legal moves): `bestmove (none)`
-        // is game-over, NOT a move. Never push/draw/autoplay it (it used to
-        // surface as "推荐：(none)" + 50% win rate, trip the shallow-depth
-        // tripwire at depth 0, and — length 6 — detonate the promotion plea).
-        // Mate 0 vs stalemate rides BestMove.isMate (both encode scoreCp 0).
+    private fun publishBest(position: Position, fen: String, stm: String?, best: BestMove, ponderHit: Boolean) {
+        val user = position.user
         if (best.uci == "(none)") {
-            analysedFen = fen
-            lastPushedMove = null
-            lastPushedFen = null
-            lastBestMove = null
-            lastBestMoveAt = 0
-            lastScoreCp = null
-            lastScoreStm = null
-            lastScoreUser = null
-            lastDepth = 0
-            lastPonderMove = null
-            lastError = null
-            val msg = if (best.isMate) "被将死，对方M0" else "无合法着法（逼和或终局）"
-            note("终局：$msg")
-            OverlayManager.showStatus("对局结束", msg)
-            BridgeServer.pushClear()
+            val outcome = if (best.isMate && user != null && user.equals(stm, ignoreCase = true)) "LOSS" else null
+            val end = GameEnd(if (best.isMate) "CHECKMATE" else "NO_LEGAL_MOVES", outcome)
+            receivePosition(position.copy(end = end), fromEngine = true)
             return
         }
-        analysedFen = fen
-        lastPushedMove = best.uci
-        lastPushedFen = fen
-        lastBestMove = best.uci
-        lastBestMoveAt = System.currentTimeMillis()
-        lastScoreCp = best.scoreCp
-        lastScoreStm = stm
-        lastScoreUser = user
-        lastDepth = best.depth
-        lastPonderMove = best.ponder
-        lastResultFromPonder = ponderHit
-        // A fresh result clears stale failure text (e.g. an old "Stream closed"
-        // lingering on the status card long after recovery confuses everyone).
-        lastError = null
-        val wr = ChessMath.formatWinRate(best.scoreCp, stm, user)
-        val ponderNote = if (best.ponder != null) "，ponder ${best.ponder}" else ""
-        note("最佳招法 ${best.uci}（深度${best.depth}，cp=${best.scoreCp}，$wr$ponderNote）")
-        if (ponderHit) {
-            note("极限思考${lastPonderHit.orEmpty()}，复用预计算结果")
+        synchronized(pendingLock) {
+            if (!isPlayable(position)) return
+            analysedFen = fen
+            lastPushedMove = best.uci
+            lastPushedFen = fen
+            lastBestMove = best.uci
+            lastBestMoveAt = System.currentTimeMillis()
+            lastScoreCp = best.scoreCp
+            lastScoreStm = stm
+            lastScoreUser = user
+            lastDepth = best.depth
+            lastPonderMove = best.ponder
+            lastResultFromPonder = ponderHit
+            lastError = null
+            val wr = ChessMath.formatWinRate(best.scoreCp, stm, user)
+            val ponderNote = if (best.ponder != null) "，ponder ${best.ponder}" else ""
+            note("最佳招法 ${best.uci}（深度${best.depth}，cp=${best.scoreCp}，$wr$ponderNote）")
+            if (ponderHit) note("极限思考${lastPonderHit.orEmpty()}，复用预计算结果")
+            BridgeServer.pushBestmove(
+                best.uci, fen, BridgeSettings.autoPlayEnabled, BridgeSettings.autoPlayDelayMs, ponderHit, position.gameId,
+            )
+            OverlayManager.showBestMove(
+                best.uci, fen, best.scoreCp, BridgeSettings.autoPlayEnabled, user,
+                best.depth, ponderHit = ponderHit,
+            )
         }
-        // One combined command: the hook draws AND (if enabled) auto-plays it.
-        BridgeServer.pushBestmove(
-            best.uci, fen,
-            BridgeSettings.autoPlayEnabled, BridgeSettings.autoPlayDelayMs, ponderHit
-        )
-        OverlayManager.showBestMove(
-            best.uci, fen, best.scoreCp, BridgeSettings.autoPlayEnabled, user,
-            best.depth, ponderHit = ponderHit,
-        )
     }
 
     /**
@@ -749,10 +853,10 @@ object EngineLoop {
      * search, just re-derive the display triple and repaint the banner.
      * No-op when there is no cached result for this fen (e.g. terminal).
      */
-    private fun refreshPerspective(fen: String, user: String?) {
+    private fun refreshPerspective(fen: String, user: String?) = synchronized(pendingLock) {
         val m = lastPushedMove
         val f = lastPushedFen
-        if (m == null || f == null || f != fen || f != analysedFen) return
+        if (pending.end != null || m == null || f != fen || f != analysedFen || f != pending.fen) return@synchronized
         lastScoreUser = user
         lastError = null
         OverlayManager.showBestMove(
@@ -776,6 +880,7 @@ object EngineLoop {
 
     /** Minutes since the last published position, or -1 when fresh/never. */
     fun staleMinutes(): Long {
+        if (pending.end != null) return -1
         if (lastPositionAt <= 0) return -1
         val idle = System.currentTimeMillis() - lastPositionAt
         return if (idle > STALE_AFTER_MS) idle / 60_000 else -1
@@ -786,10 +891,10 @@ object EngineLoop {
      * game was active, say so on the banner/event instead of showing a frozen
      * "waiting" line that looks identical to healthy waiting. Throttled.
      */
-    private fun maybeNoteStale() {
-        if (lastPositionAt <= 0 || !running.get()) return
+    private fun maybeNoteStale() = synchronized(pendingLock) {
+        if (pending.end != null || lastPositionAt <= 0 || !running.get()) return@synchronized
         val idle = System.currentTimeMillis() - lastPositionAt
-        if (idle <= STALE_AFTER_MS) return
+        if (idle <= STALE_AFTER_MS) return@synchronized
         val now = System.currentTimeMillis()
         if (now - lastStaleBannerAt > 30_000) {
             lastStaleBannerAt = now
@@ -833,10 +938,13 @@ object EngineLoop {
         val staleMinOrNull: Long?,
         val oursTurnWaiting: Boolean,
         val error: String?,
+        val gameStatus: String?,
+        val gameResult: String,
     )
 
     fun snapshot(): StatusSnapshot {
         val c = client
+        val end = pending.end
         val hookState = when {
             BridgeServer.hookConnected() -> "已连接（socket 在线）"
             lastPositionAt > 0 -> "已连接（${ago(lastPositionAt)}收到局面）"
@@ -863,7 +971,7 @@ object EngineLoop {
             ponderLine = ponderLine(),
             backendLine = backendLine(),
             fen = currentFen ?: "-",
-            bestMove = lastBestMove,
+            bestMove = lastBestMove.takeIf { end == null },
             bestAgo = if (lastBestMove != null) ago(lastBestMoveAt) else "",
             winText = if (lastBestMove != null) {
                 ChessMath.formatWinRate(lastScoreCp, lastScoreStm, lastScoreUser)
@@ -872,7 +980,8 @@ object EngineLoop {
                 ChessMath.userWinRate01(lastScoreCp, lastScoreStm, lastScoreUser)
             } else null,
             settingsLine = BridgeSettings.describe(),
-            autoLine = if (BridgeSettings.autoPlayEnabled) {
+            autoLine = if (end != null && BridgeSettings.autoPlayEnabled) "本局已停止"
+                else if (BridgeSettings.autoPlayEnabled) {
                 "开（${BridgeSettings.autoPlayDelayMs}ms）"
             } else "关",
             heartbeatAgo = ago(lastLoopAt),
@@ -880,6 +989,8 @@ object EngineLoop {
             oursTurnWaiting = (staleMinutes() >= 0) &&
                 lastTurnColor != null && lastTurnColor == lastUserColor,
             error = lastError,
+            gameStatus = end?.let(::endTitle),
+            gameResult = end?.let(::endDetail).orEmpty(),
         )
     }
 
@@ -895,14 +1006,14 @@ object EngineLoop {
      * Semi-auto entry: play the latest pushed bestmove on user tap (banner button).
      * Same freshness rules as autoplay — never plays a stale move.
      */
-    fun playPendingBestmove() {
+    fun playPendingBestmove() = synchronized(pendingLock) {
         val m = lastPushedMove
         val f = lastPushedFen
-        if (m == null || f == null || f != analysedFen) {
+        if (pending.end != null || m == null || f == null || f != analysedFen || f != pending.fen) {
             note("点走棋：当前无可走招法")
-            return
+            return@synchronized
         }
-        BridgeServer.pushPlay(m, f, BridgeSettings.autoPlayDelayMs)
+        BridgeServer.pushPlay(m, f, BridgeSettings.autoPlayDelayMs, pending.gameId)
         note("手动走棋已发送：$m")
     }
 
@@ -927,6 +1038,7 @@ object EngineLoop {
             appendLine("算力后端：${backendLine()}")
             appendLine("极限思考：${ponderLine()}")
             appendLine("当前 FEN：${currentFen ?: "-"}")
+            pending.end?.let { appendLine(listOf(endTitle(it), endDetail(it)).filter(String::isNotEmpty).joinToString(" · ")) }
             appendLine("最佳招法：${lastBestMove ?: "-"}${if (lastBestMove != null) "（${ago(lastBestMoveAt)}${if (lastDepth > 0) " · 深度$lastDepth" else ""}）" else ""}")
             if (lastBestMove != null) {
                 appendLine("${ChessMath.formatWinRate(lastScoreCp, lastScoreStm, lastScoreUser)}")
@@ -958,12 +1070,18 @@ object EngineLoop {
         var lastAnalysedUser: String? = null
         var lastAnalysedTurn: String? = null
         var prevFen: String? = null
+        var previousGameId: String? = null
         var lastSkippedFen: String? = null
         var lastWaitingDetail: String? = null
         fun isStale(): Boolean = gen != workerGen
         while (running.get() && !isStale()) {
             lastLoopAt = System.currentTimeMillis()
+            val position = pending
             try {
+                if (position.end != null) {
+                    Thread.sleep(60)
+                    continue
+                }
                 // Local snapshot: stop() (main thread) nulls `client` and destroys
                 // the process concurrently — `client!!` here raced that and threw
                 // a misleading NPE that flashed STATE_FAILED on every normal stop.
@@ -976,59 +1094,57 @@ object EngineLoop {
                         try { c.stop() } catch (_: Throwable) {}
                         client = null
                     }
-                    engineState = STATE_STARTING
+                    val starting = synchronized(pendingLock) {
+                        if (pending.end != null || pending.gameId != position.gameId) false
+                        else { engineState = STATE_STARTING; true }
+                    }
+                    if (!starting) continue
                     c = createMainClient()
                     // Lost the race with a newer generation while starting (handshake
                     // takes seconds): shut our engine down, don't clobber its client.
-                    if (isStale()) {
-                        try { c.stop() } catch (_: Throwable) {}
-                        return
+                    val installed = synchronized(pendingLock) {
+                        if (isStale() || pending.end != null || pending.gameId != position.gameId) false
+                        else {
+                            client = c
+                            engineState = STATE_RUNNING
+                            note("引擎已启动，等待对局局面…")
+                            OverlayManager.showStatus("ChessPilot", "等待对局…")
+                            true
+                        }
                     }
-                    client = c
+                    if (!installed) {
+                        try { c.stop() } catch (_: Throwable) {}
+                        continue
+                    }
                     restarts = 0
-                    engineState = STATE_RUNNING
-                    note("引擎已启动，等待对局局面…")
-                    OverlayManager.showStatus("ChessPilot", "等待对局…")
                 }
-                val (position, moves) = synchronized(pendingLock) {
-                    Triple(pendingFen, pendingUserColor, pendingTurnColor) to pendingMoves
-                }
-                val (fen, user, turn) = position
+                val (fen, user, turn, moves, gameId) = position
                 if (fen == null) {
                     maybeNoteStale()
                     Thread.sleep(60)
                     continue
                 }
-                // Game boundary BEFORE the idle check: a fresh startpos after any
-                // other position means a NEW game. The idle check below would match
-                // lastAnalysedFen from the previous game and the white opening would
-                // be silently ignored forever (same class of stuck as cross-game
-                // userColor, but engine-side and therefore never self-healing).
-                // (Caught by the back-to-back startpos test, not by review.)
-                if (fen == STARTPOS_FEN && prevFen != STARTPOS_FEN) {
+                // Board identity handles rematches with an identical FEN, including
+                // mini matches that start from a custom position.
+                val legacyStart = gameId == null && fen == STARTPOS_FEN && prevFen != STARTPOS_FEN
+                if (gameId != previousGameId || legacyStart) {
                     lastAnalysedFen = null
                     lastAnalysedUser = null
                     lastAnalysedTurn = null
-                    analysedFen = null
-                    lastBestMove = null
-                    lastBestMoveAt = 0
-                    lastScoreCp = null
-                    lastScoreStm = null
-                    lastScoreUser = null
-                    lastDepth = 0
                     lastSkippedFen = null
-                    lastPonderMove = null
-                    lastPonderHit = null
-                    lastResultFromPonder = false
-                    lastPushedPonderKey = null
-                    ensurePonderStopped()
+                    lastWaitingDetail = null
+                    settleFen = null
+                    if (legacyStart) {
+                        synchronized(pendingLock) { if (isPlayable(position)) clearRecommendation() }
+                        ensurePonderStopped()
+                    }
                     // New game lifts the remote quarantine: if the previous
                     // game fell back to local, retry remote now. Drop local
                     // clients so the loop recreates through the policy.
                     remoteDownSticky = false
                     remoteCoolUntil = 0L
                     if (BridgeSettings.backend != BridgeSettings.BACKEND_LOCAL) {
-                        if (client is StockfishClient) {
+                            if (client is StockfishClient) {
                             try { client?.stop() } catch (_: Throwable) {}
                             client = null
                         }
@@ -1039,7 +1155,9 @@ object EngineLoop {
                     }
                     note("新开局，已清空上局残留")
                 }
+                previousGameId = gameId
                 prevFen = fen
+                if (!isPlayable(position)) continue
                 if (fen == lastAnalysedFen) {
                     // Same-FEN color correction: the hook republishes an
                     // unchanged position when lagging turn/user fields catch
@@ -1090,7 +1208,8 @@ object EngineLoop {
                     // Opponent's clock is free thinking time when ponder is on.
                     // Start the job BEFORE painting so the overlay suffix below
                     // reflects the live job, not last iteration's state.
-                    maybePonder(fen, moves, gen)
+                    maybePonder(position, fen, gen)
+                    if (!isPlayable(position)) continue
                     if (fen != lastSkippedFen) {
                         lastSkippedFen = fen
                         // Turn flipped to the opponent: retire OUR yellow arrow
@@ -1100,7 +1219,7 @@ object EngineLoop {
                         // Otherwise the lingering yellow reads as a "yellow
                         // prediction" through fast opponent turns. Text
                         // conclusion survives in the overlay either way.
-                        if (!isPonderPushedFor(fen)) BridgeServer.pushClear()
+                        if (!isPonderPushedFor(fen)) BridgeServer.pushClear(gameId)
                         lastWaitingDetail = null
                     }
                     // Update on new completed iterations too, not only a new FEN.
@@ -1109,7 +1228,9 @@ object EngineLoop {
                     val detail = listOf(conclusion, guess).filter(String::isNotEmpty).joinToString("\n")
                     if (detail != lastWaitingDetail) {
                         lastWaitingDetail = detail
-                        OverlayManager.clear("等待对手走棋…", detail)
+                        synchronized(pendingLock) {
+                            if (isPlayable(position)) OverlayManager.clear("等待对手走棋…", detail)
+                        }
                     }
                     // Reachable even when positions keep arriving: a perpetual
                     // opponent-turn (bot stuck, lesson fetching) must still age
@@ -1125,22 +1246,22 @@ object EngineLoop {
                 // normal search below owns the engine alone.
                 // A prepared reply bypasses the normal timed search below.
                 lastWaitingDetail = null
-                val pondered = tryConsumePonder(fen, moves)
+                val pondered = tryConsumePonder(position, fen, moves)
                 if (pondered != null) {
                     lastLoopAt = System.currentTimeMillis()
                     if (isStale()) return
+                    if (!isPlayable(position)) continue
                     lastAnalysedFen = fen
                     lastAnalysedUser = user
                     lastAnalysedTurn = turn
-                    publishBest(fen, stm, user, pondered, ponderHit = true)
+                    publishBest(position, fen, stm, pondered, ponderHit = true)
                     continue
                 }
                 // tryConsume may have taken seconds (ponderhit join) and may even
                 // have dropped a hung engine: re-read everything — a newer
                 // our-turn position must not be skipped for this stale snapshot,
                 // and a dropped client must recreate instead of being analysed on.
-                val freshFen = synchronized(pendingLock) { pendingFen }
-                if (freshFen != null && freshFen != fen) continue
+                if (!isPlayable(position)) continue
                 c = client
                 if (c == null || !c.isRunning()) {
                     // Remote died mid-game (timeout streak / broken socket):
@@ -1152,18 +1273,35 @@ object EngineLoop {
                     continue
                 }
 
-                OverlayManager.showThinking(BridgeSettings.autoPlayEnabled)
                 // Remote engine obeys the remote sliders (sent per request,
                 // server honors them); local obeys the local ones.
                 val mt = if (c is RemoteEngineClient) BridgeSettings.remoteMovetimeMs
                     else BridgeSettings.movetimeMs
                 val dp = if (c is RemoteEngineClient) BridgeSettings.remoteDepth
                     else BridgeSettings.searchDepth
-                val best = c.analyse(fen, mt, dp)
+                val engine = c
+                val started = synchronized(pendingLock) {
+                    if (isStale() || !isPlayable(position)) false
+                    else {
+                        analysingClient = engine
+                        OverlayManager.showThinking(BridgeSettings.autoPlayEnabled)
+                        true
+                    }
+                }
+                if (!started) continue
+                val best = try {
+                    if (!isPlayable(position) || isStale()) continue
+                    engine.analyse(fen, mt, dp)
+                } finally {
+                    synchronized(pendingLock) {
+                        if (analysingClient === engine) analysingClient = null
+                    }
+                }
                 lastLoopAt = System.currentTimeMillis()
                 // Stale generation waking from a blocking analyse: never publish —
                 // the current worker already owns this position (or a newer one).
                 if (isStale()) return
+                if (!isPlayable(position)) continue
                 if (best != null) {
                     lastAnalysedFen = fen
                     lastAnalysedUser = user
@@ -1185,11 +1323,11 @@ object EngineLoop {
                             "for ${mt}ms budget (uci=${best.uci})")
                         note("分析深度异常：${mt}ms 只搜到深度${best.depth}（${best.uci}），结果仍采用")
                     }
-                    publishBest(fen, stm, user, best, ponderHit = false)
+                    publishBest(position, fen, stm, best, ponderHit = false)
                 } else {
                     // Transient failure (timeout/crash): do NOT mark as analysed or the
                     // position would never be retried until the next move. Back off
-                    // briefly; a newer position preempts us via pendingFen.
+                    // briefly; the next tick reads the latest position.
                     Log.w(TAG, "analyse returned null for ${fen.take(30)}…, will retry")
                     Thread.sleep(500)
                 }
@@ -1202,6 +1340,7 @@ object EngineLoop {
                     Log.i(TAG, "loop stopped (${t.javaClass.simpleName})")
                     return
                 }
+                if (pending.end != null || pending.gameId != position.gameId) continue
                 lastError = t.toString().take(200)
                 engineState = STATE_FAILED
                 Log.e(TAG, "loop error: $t")

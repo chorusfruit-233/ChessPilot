@@ -14,9 +14,11 @@ internal class GenerationHandler(looper: Looper) {
     @Synchronized fun postDelayed(task: Runnable, delay: Long): Boolean =
         !closed && handler.postDelayed(task, delay)
 
+    @Synchronized fun cancelPending() = handler.removeCallbacksAndMessages(null)
+
     @Synchronized fun close() {
         closed = true
-        handler.removeCallbacksAndMessages(null)
+        cancelPending()
     }
 
     companion object {

@@ -70,13 +70,9 @@ object BridgePublisher {
     @Volatile var lastBestAttemptAt: Long = 0
     @Volatile var lastAnalyzedFen: String? = null
 
-    /**
-     * New game/lesson: drop the previous game's sticky state. Without this, the old
-     * userColor inverts the new game (white opening skipped as "opponent's turn"),
-     * and the identical startpos FEN is change-deduped into silence.
-     */
+    /** Drop recommendations and force a snapshot on a game transition. */
     @Synchronized
-    fun resetForNewGame() {
+    fun resetPosition() {
         lastAnalyzedFen = null
         lastPublishKey = null
         bestCmd = BestCmd(null, null, 0)
@@ -87,24 +83,6 @@ object BridgePublisher {
         bestConfirmedFen = null
         bestConfirmedMove = null
         lastBestAttemptAt = 0
-        MainHook.log("new game: sticky state reset")
-    }
-
-    /**
-     * Partial reset for a rebuilt board controller: force the CURRENT position to
-     * republish (lesson retries reconstruct identical setups that change-detection
-     * would otherwise swallow), but KEEP the last bestmove so the painter can
-     * immediately redraw it on the fresh board without waiting for re-analysis.
-     * Full resetForNewGame is reserved for the exact-startpos new-game signal.
-     */
-    @Synchronized
-    fun resetPublishState() {
-        lastAnalyzedFen = null
-        lastPublishKey = null
-        bestConfirmedFen = null
-        bestConfirmedMove = null
-        lastBestAttemptAt = 0
-        MainHook.log("board rebuilt: republish armed")
     }
 
     // Trigger accounting for stuck-game diagnosis (see StateBridge call sites).
@@ -149,18 +127,22 @@ object BridgePublisher {
     // freshness compare against move FENs, so this must never become a composite.
     // Metadata corrections, including delayed move history, travel in this key.
     private data class PublishKey(
-        val fen: String, val turn: String?, val user: String?, val moves: List<String>,
+        val fen: String?, val turn: String?, val user: String?, val moves: List<String>,
+        val gameId: String?, val end: GameEnd?,
     )
     @Volatile private var lastPublishKey: PublishKey? = null
 
     @Synchronized
-    fun publishSnapshot(fen: String, userColor: String?, turnColor: String?, moves: List<String>) {
+    fun publishSnapshot(
+        fen: String?, userColor: String?, turnColor: String?, moves: List<String>,
+        gameId: String? = null, end: GameEnd? = null,
+    ) {
         // FEN construction precedes the game-state constructor. The first FEN
         // therefore often carries the previous history; the completed state must
         // republish its corrected moves even when FEN and both colors are equal.
         // Keep an immutable history copy so later list mutation cannot change the key.
         // (Companion restarts are covered by BridgeClient's reconnect flush.)
-        val key = PublishKey(fen, turnColor, userColor, moves.toList())
+        val key = PublishKey(fen, turnColor, userColor, moves.toList(), gameId, end)
         if (key == lastPublishKey) {
             pubDup++
             return
@@ -168,7 +150,7 @@ object BridgePublisher {
         lastPublishKey = key
         lastAnalyzedFen = fen
         try {
-            BridgeClient.sendPosition(fen, userColor, turnColor, moves)
+            BridgeClient.sendPosition(fen, userColor, turnColor, moves, gameId, end)
             pubSent++
             MainHook.log("published: $fen  turn=$turnColor user=$userColor")
         } catch (t: Throwable) {

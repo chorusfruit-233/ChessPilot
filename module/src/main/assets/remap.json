@@ -55,6 +55,21 @@
     "boardController": [
       "mz6"
     ],
+    "chessSession": [
+      "r37"
+    ],
+    "botSession": [
+      "com.duolingo.feature.chess.match.j"
+    ],
+    "pvpSession": [
+      "tr6"
+    ],
+    "miniGame": [
+      "k25"
+    ],
+    "miniSession": [
+      "le6"
+    ],
     "piece": [
       "eh6"
     ]
@@ -62,6 +77,36 @@
   "methods": {
     "clearArrows": [
       "c0"
+    ],
+    "sessionController": [
+      "l"
+    ],
+    "sessionCleared": [
+      "onCleared"
+    ],
+    "botGameEnd": [
+      "I"
+    ],
+    "botExit": [
+      "N"
+    ],
+    "pvpGameEnd": [
+      "G"
+    ],
+    "miniGameStart": [
+      "j"
+    ],
+    "miniGameEnd": [
+      "m"
+    ],
+    "miniSessionEnd": [
+      "F"
+    ],
+    "liveState": [
+      "J"
+    ],
+    "setupBoard": [
+      "O"
     ]
   }
 }

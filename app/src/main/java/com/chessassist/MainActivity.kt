@@ -532,7 +532,15 @@ class MainActivity : Activity() {
             else -> modeBadge.visibility = View.GONE
         }
 
-        if (s.bestMove != null) {
+        if (s.gameStatus != null) {
+            moveCap.text = s.gameStatus
+            bestMoveTv.text = "——"
+            bestMoveTv.setTextColor(Ui.T3)
+            winRateTv.text = s.gameResult
+            winRateTv.setTextColor(Ui.T2)
+            winBar.set(0f, Ui.T3)
+            bestSub.text = ""
+        } else if (s.bestMove != null) {
             moveCap.text = if (BridgeSettings.autoPlayEnabled) "自动走棋中" else "最佳招法"
             bestMoveTv.text = s.bestMove
             bestMoveTv.setTextColor(if (BridgeSettings.autoPlayEnabled) Ui.GOLD else Ui.T1)
