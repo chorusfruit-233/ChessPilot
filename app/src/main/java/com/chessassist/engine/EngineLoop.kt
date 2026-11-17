@@ -661,7 +661,10 @@ object EngineLoop {
         // Remote resources come from the PC: label them remote instead of mixing
         // the local berserk switch with PC threads/hash on one line.
         val mode = if (c is RemoteEngineClient) "远程" else BridgeSettings.modeShort()
-        return "$mode · $res$depth"
+        val cpu = (c as? StockfishClient)?.cpuVariant?.let {
+            " · " + if (it == "armv8-dotprod") "NEON DotProd" else "ARMv8 NEON"
+        } ?: ""
+        return "$mode · $res$depth$cpu"
     }
 
     /**

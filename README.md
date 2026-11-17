@@ -4,7 +4,7 @@
 
 **在多邻国国际象棋里实时看胜率、画推荐箭头、自动走棋 —— 手机自带引擎，或连电脑算力**
 
-*LSPosed hook + Stockfish companion for Duolingo chess: live analysis,
+*One APK: libxposed API 102 module + Stockfish companion for Duolingo chess: live analysis,
 best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -39,14 +39,13 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 ## 🚀 快速上手（3 分钟）
 
-前提：手机已 root 并装好 **LSPosed（Zygisk）**。当前模块适配多邻国 `6.105.2`（arm64），已核对 APK 接口并通过构建，尚待真机验证；`6.85.7` 是旧版模块的实测基准，详见下方「适配环境」。
+前提：手机已 root，并装好**支持 libxposed API 102 的 Xposed 框架**。旧版只支持 API 82/100/101 的 LSPosed 不能加载本版。当前适配多邻国 `6.105.2`（arm64），已核对 APK 接口并通过构建，尚待真机验证；`6.85.7` 是旧版模块的实测基准。
 
-1. 到 [Releases](https://github.com/a1175815821/ChessPilot/releases) 下载并安装两个包：
-   `module-release-test.apk`（LSPosed 模块）＋ `app-release-test.apk`（伴侣 App）
-2. LSPosed 里启用模块，作用域勾选**多邻国**，重启手机
-3. 打开伴侣 App，点一次「启动引擎服务」（通知权限给一下）→ 进多邻国开一局，金色箭头就出现了
+1. 安装 **ChessPilot 0.6.0 合包 APK**（包名仍为 `com.chessassist`），模块、引擎和控制页都在这一包里。
+2. 从旧版迁移时，在框架管理器中停用原来的独立模块，再启用新的 **ChessPilot**，作用域只选**多邻国**，将多邻国结束运行后重开一次。
+3. 打开 ChessPilot，点「启动引擎服务」（允许通知）→ 进多邻国开一局。状态页可查看模块连接和实际 CPU 路径。
 
-适配 `6.105.2` 时，模块须使用已适配的构建（见「自己构建」）；上游旧版 `0.5` 模块仍使用 `6.85.7` 映射。极限思考修复需使用伴侣 App `0.5.1`；已适配的模块可沿用。覆盖安装须沿用原签名密钥。
+本版保留 `0.5.1` 的极限思考修复。覆盖安装须沿用原签名密钥，设置沿用原包；以后更新合包无需分别更新模块和伴侣。API 102 → API 102 的更新启用自动 hot reload，也可在控制页点「热重载多邻国模块」重试过期/失败的目标。首次从旧 API 迁移仍需重开多邻国；框架不支持或清理失败时也需重开。安装更新可能停止 ChessPilot 自身的引擎服务，重新启动服务即可。详见 [迁移、热重载与 CPU 验证](docs/API102_CPU.md)。
 
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
@@ -91,8 +90,8 @@ Hook 依赖多邻国内部的混淆名，`remap.json` 针对下面的具体构�
 
 | 部分 | 是什么 |
 |---|---|
-| [module/](module) | LSPosed 模块（跑在多邻国进程内）：Hook 棋盘状态、驱动 Rive 控制器画箭头与走子、回环 TCP 通信 |
-| [app/](app) | 伴侣 App：Stockfish 引擎（NNUE 烘进 so）、TCP 桥（JSON 行协议）、悬浮窗、控制页 |
+| [module/](module) | API 102 Hook 库，由 `app` 打进同一 APK；注入多邻国进程，读取局面、画箭头与走子 |
+| [app/](app) | 唯一安装包：模块入口、Stockfish 引擎、TCP 桥、悬浮窗、控制页、框架热重载服务 |
 | [pc/](pc) | 电脑算力端：纯 Python 标准库，零第三方依赖，引擎自动下载 |
 | [docs/](docs) | 使用手册、逆向笔记（坐标映射、`remap.json` 再生流程）、设计系统（含[浏览器原型](docs/design/prototype.html)） |
 
@@ -104,13 +103,17 @@ Hook 依赖多邻国内部的混淆名，`remap.json` 针对下面的具体构�
 # 1. 取 Stockfish 源码（SF19，网名即哈希验货）
 tools/fetch_stockfish.sh
 
-# 2. 构建（Gradle Wrapper 8.7，JDK 17+，ANDROID_HOME 指向 SDK，首次需联网）
-java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain :app:assembleRelease :module:assembleRelease
+# 2. 构建（Gradle 9.4.1 / AGP 9.2.1，完整 JDK 17+，首次需联网）
+# SDK 37（sdkmanager 包名 platforms;android-37.0）、Build Tools 36.0.0、NDK 26.1.10909125、CMake 3.22.1
+sh gradlew.sh :app:assembleRelease :app:testDebugUnitTest :module:testDebugUnitTest :app:lintRelease
 
-# 3. 本地 debug.keystore 签名 → dist/
+# 3. 检查实际 APK（签名前后均可），然后用自己的密钥签名 → dist/
+python tools/check_unified_apk.py app/build/outputs/apk/release/app-release-unsigned.apk --nnue app/src/main/cpp/stockfish/src/nn-1a298aa575a0.nnue
 ```
 
-Linux/macOS 可用 `sh gradlew.sh :module:assembleDebug` 构建模块（JDK 17+、Android SDK 34；首次构建需联网）。仅更新多邻国版本映射时可沿用旧伴侣；极限思考修复需构建并更新 `app`，使用远程算力时还需更新电脑脚本。
+输出为 `app/build/outputs/apk/release/app-release-unsigned.apk`；`module` 现在是库，不再输出独立 APK。Windows 可用 `java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain` 替代 `sh gradlew.sh`。使用远程算力时仍需同步电脑脚本。
+
+本地引擎按系统 CPU 能力选择 ARMv8 NEON 或 ARMv8.2 DotProd；骁龙 8 Elite 正常会走 DotProd。两套代码共享一份内嵌 NNUE，并启用 ThinLTO 与预取。未增加 GPU/NPU 后端，提速幅度需在手机上测量：`python tools/bench_android_cpu.py --output cpu-bench.json`。
 
 多邻国升级导致混淆名变了？不用慌：`tools/remap.py` 可以从新 APK 再生映射表，流程见逆向笔记。
 

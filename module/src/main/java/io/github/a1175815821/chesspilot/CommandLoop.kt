@@ -13,6 +13,15 @@ object CommandLoop {
     private var painterInst: ArrowPainter? = null
     private var playerInst: AutoPlayer? = null
 
+    @Synchronized
+    fun stop() {
+        started = false
+        painterInst?.close()
+        playerInst?.close()
+        painterInst = null
+        playerInst = null
+    }
+
     /** Call once from MainHook after remap+bridge+painter exist; starts the bridge client.
      * The painter/player are the SINGLE shared instances (the old lazy second painter
      * re-resolved sMethod and re-probed enum colors on its own). */
@@ -27,6 +36,7 @@ object CommandLoop {
 
     /** Called on the bridge reader thread for every incoming command. */
     fun handleCommand(cmd: Map<String, String>) {
+        if (!started || !HookRuntime.active) return
         try {
             when (cmd["cmd"]) {
                 "bestmove" -> {

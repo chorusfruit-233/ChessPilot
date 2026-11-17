@@ -19,6 +19,12 @@ import kotlin.math.max
  * as live reverse-engineering when Duolingo renames things again.
  */
 object RiveViewFinder {
+    fun clear() {
+        synchronized(ctorLock) { ctorInstances.clear() }
+        BridgeAccess.riveCandidates = emptyList()
+        BridgeAccess.riveView = null
+        lastChoice = "-"
+    }
 
     private const val MAX_CTOR_INSTANCES = 16
 

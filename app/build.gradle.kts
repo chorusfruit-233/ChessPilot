@@ -1,18 +1,18 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.chessassist"
-    compileSdk = 34
+    compileSdk = 37
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.chessassist"
         minSdk = 27
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = 7
+        versionName = "0.6.0"
         ndk {
             // Stockfish builds for arm64 (NNUE needs NEON); armeabi-v7a optional but slow.
             abiFilters += listOf("arm64-v8a")
@@ -49,10 +49,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    packaging.resources.merges += "META-INF/xposed/*"
 }
 
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+
 dependencies {
+    implementation(project(":module"))
+    implementation("io.github.libxposed:service:102.0.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
     testImplementation("junit:junit:4.13.2")
