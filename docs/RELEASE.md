@@ -1,6 +1,6 @@
 # GitHub 构建与发布
 
-`.github/workflows/android-build.yml` 在 `master` 更新时构建，也可在 Actions 页面手动运行。工作流固定 Android/JDK 工具链和官方 Actions 提交，执行 Kotlin、映射、真实 Stockfish 回归及 lint，并直接核验 APK 中的 API 102 入口、CPU 路径和网络权重。
+`.github/workflows/android-build.yml` 在 `master` 更新时构建，也可在 Actions 页面手动运行。工作流下载并校验固定的官方 Android 命令行工具，自行安装 SDK，避免依赖 runner 预装环境；固定 Android/JDK 工具链和官方 Actions 提交，执行 Kotlin、映射、真实 Stockfish 回归及 lint，并直接核验 APK 中的 API 102 入口、CPU 路径和网络权重。
 
 构建产物为 `ChessPilot-unsigned-<完整提交 SHA>`，包含未签名 APK、`BUILD_INFO.json`、校验和，以及对应的完整项目/Stockfish 源码归档（含同一份 NNUE）。测试和 lint 报告单独存放。源码归档从 Git 中提取，只加入已核验的网络文件，排除本地构建缓存和签名密钥。
 

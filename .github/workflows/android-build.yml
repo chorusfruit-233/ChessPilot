@@ -34,10 +34,26 @@ jobs:
       - name: Install Android build tools
         shell: bash
         run: |
+          export ANDROID_HOME="$RUNNER_TEMP/android-sdk"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          sdk_archive="$RUNNER_TEMP/android-commandlinetools.zip"
+          curl --fail --location --retry 3 --retry-all-errors \
+            'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip' \
+            --output "$sdk_archive"
+          printf '%s  %s\n' \
+            '2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258' \
+            "$sdk_archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/android-cli" "$ANDROID_HOME/cmdline-tools"
+          unzip -q "$sdk_archive" -d "$RUNNER_TEMP/android-cli"
+          mv "$RUNNER_TEMP/android-cli/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' "$ANDROID_HOME" "$ANDROID_HOME" >> "$GITHUB_ENV"
+          printf '%s\n' "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null
           set -o pipefail
-          sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
 
       - name: Fetch Stockfish 19 and verify NNUE
         shell: bash
