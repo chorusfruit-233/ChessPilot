@@ -59,6 +59,7 @@ object CommandLoop {
                     // Single source of truth: the companion (BridgeSettings)
                     // decides autoplay and ships it as cmd["autoplay"].
                     if (cmd["autoplay"] == "1") {
+                        MainHook.log("autoplay source=${cmd["source"] ?: "legacy"} move=$uci")
                         playerInst?.performMove(
                             uci, fen,
                             cmd["autoplayDelay"]?.toLongOrNull()

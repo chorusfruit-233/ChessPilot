@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * diagnostics-only.
  *
  * Reliability rules implemented here:
- *  - Analysis is skipped when it's not our turn (turnColor != userColor) or the
+ *  - Analysis is skipped when it's not our turn (FEN side to move != userColor) or the
  *    position didn't change — keeps CPU and battery at zero while idle.
  *  - A single analysis slot; a newer position cancels interest in the older one.
  *  - Engine crashes are contained: restart with backoff, request the hook to re-send.
@@ -196,8 +196,14 @@ object EngineLoop {
     private fun ensurePonderStopped() {
         val session = ponderSession
         ponderSession = null
-        val t = session?.thread
         session?.cancel()
+        stopPonderSearch(session)
+    }
+
+    /** Retire the reader separately from the cached reply's eventual consumption. */
+    private fun stopPonderSearch(session: PonderSession?) {
+        session?.stopSearch()
+        val t = session?.thread
         if (t == null) return
         // FIRST: tell the reader loop to exit on its next line. WITHOUT this the
         // thread parks in readLine forever on its (now dead-end) reader.
@@ -205,7 +211,8 @@ object EngineLoop {
         // Signal the PONDER process only — the main client must never see a
         // ponder stop (cross-talk on a shared stream was the old
         // wrong-move vector; separate processes make it impossible).
-        try { ponderClient?.stopPonder() } catch (_: Throwable) {}
+        val engine = ponderClient
+        try { engine?.stopPonder() } catch (_: Throwable) {}
         // stop finalizes the search, waking the reader to see its stop flag.
         if (Thread.currentThread() !== t) {
             try { t.join(PONDER_STOP_JOIN_MS) } catch (_: Throwable) {}
@@ -218,8 +225,8 @@ object EngineLoop {
                 // Main analysis continues untouched.
                 Log.w(TAG, "ponder thread parked after stop; killing ponder engine")
                 note("极限思考线程卡住，已丢弃重建（对局不受影响）")
-                try { ponderClient?.stop() } catch (_: Throwable) {}
-                ponderClient = null
+                try { engine?.stop() } catch (_: Throwable) {}
+                if (ponderClient === engine) ponderClient = null
             }
         }
     }
@@ -278,7 +285,11 @@ object EngineLoop {
             pushPonderGuessOrClear(fen, r)
             // A finished result is still useful. Do not restart and erase it
             // every 200 ms while the opponent is deciding.
-            if (ponderSession?.canKeep(fen, r) == true) return
+            val existing = ponderSession
+            if (existing?.canKeep(fen, r) == true) {
+                existing.updateSourceHistory(fen, moves)
+                return
+            }
             ensurePonderStopped()
             // P0 isolation: ponder gets its OWN engine (process or remote
             // connection). A ponder-engine failure only costs one ponder
@@ -322,8 +333,8 @@ object EngineLoop {
     /**
      * Our turn: if the opponent played the predicted move and the ponder result
      * is ready, take it (no new search). Returns the result to publish, or null
-     * to fall through to a normal analyse. Never throws; always leaves no live
-     * ponder thread behind on the null path.
+     * to fall through to a normal analyse. A newer snapshot defers consumption
+     * to the next tick and keeps the frozen cache for revalidation.
      *
      * Completed PVs are cached before bestmove; hits use them immediately.
      */
@@ -368,6 +379,14 @@ object EngineLoop {
             val hung = t.isAlive
             // Recheck against the engine's target FEN if it arrived during join.
             val matched = session.matches(fen, moves)
+            if (res != null && matched) stopPonderSearch(session)
+            // Check again AFTER stopping/joining: a correction can arrive there
+            // too. The cache survives a stopped reader until explicitly consumed.
+            val fresh = synchronized(pendingLock) { pendingFen }
+            if (fresh != null && fresh != fen) {
+                Log.i(TAG, "ponder handoff deferred to newer position")
+                return null
+            }
             ensurePonderStopped()
             if (res == null) {
                 // Silence past budget+grace means the engine is genuinely
@@ -385,13 +404,6 @@ object EngineLoop {
                 return null
             }
             if (!matched) return null
-            // A newer our-turn position may have arrived during the join: never
-            // publish a result against a fen it wasn't verified for.
-            val fresh = synchronized(pendingLock) { pendingFen }
-            if (fresh != null && fresh != fen) {
-                Log.i(TAG, "ponder result stale (newer position), re-analysing")
-                return null
-            }
             lastPonderHit = "命中 $r → ${res.uci} · 深度${res.depth} · 取用${System.currentTimeMillis() - startedAt}ms"
             return res
         } catch (_: Throwable) {
@@ -560,7 +572,8 @@ object EngineLoop {
         lastPositionAt = System.currentTimeMillis()
         lastPositionFen = fen
         lastUserColor = userColor?.lowercase()
-        lastTurnColor = turnColor?.lowercase()
+        lastTurnColor = fen.split(' ').getOrNull(1)?.lowercase()?.takeIf { it == "w" || it == "b" }
+            ?: turnColor?.lowercase()
         synchronized(pendingLock) {
             pendingFen = fen
             pendingUserColor = userColor
@@ -588,7 +601,7 @@ object EngineLoop {
             val m = lastPushedMove
             val f = lastPushedFen
             if (m != null && f != null && f == analysedFen) {
-                BridgeServer.pushBestmove(m, f, false, BridgeSettings.autoPlayDelayMs)
+                BridgeServer.pushBestmove(m, f, false, BridgeSettings.autoPlayDelayMs, lastResultFromPonder)
             }
         } catch (_: Throwable) {
         }
@@ -722,7 +735,7 @@ object EngineLoop {
         // One combined command: the hook draws AND (if enabled) auto-plays it.
         BridgeServer.pushBestmove(
             best.uci, fen,
-            BridgeSettings.autoPlayEnabled, BridgeSettings.autoPlayDelayMs
+            BridgeSettings.autoPlayEnabled, BridgeSettings.autoPlayDelayMs, ponderHit
         )
         OverlayManager.showBestMove(
             best.uci, fen, best.scoreCp, BridgeSettings.autoPlayEnabled, user,
@@ -1063,7 +1076,10 @@ object EngineLoop {
                 // Colors arrive in mixed case (hook getSymbol() yields "B"/"W", FEN
                 // yields "b"/"w") — compare case-insensitively, or black/white gets
                 // mis-skipped as "opponent's turn" forever.
-                val t = turn?.lowercase() ?: stm
+                // The board FEN is authoritative. Model turn metadata can still
+                // describe the opponent while this FEN already belongs to us;
+                // using it would restart ponder and discard our prepared reply.
+                val t = stm?.lowercase()?.takeIf { it == "w" || it == "b" } ?: turn?.lowercase()
                 val u = user?.lowercase() ?: turn?.lowercase()
                 val userIsToMove = t == u
                 // Only analyse when it's the user's move (their decision is what we assist).

@@ -11,8 +11,8 @@ android {
         applicationId = "com.chessassist"
         minSdk = 27
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.6.0"
+        versionCode = 8
+        versionName = "0.6.1"
         ndk {
             // Stockfish builds for arm64 (NNUE needs NEON); armeabi-v7a optional but slow.
             abiFilters += listOf("arm64-v8a")
@@ -45,6 +45,9 @@ android {
             isMinifyEnabled = false
         }
     }
+    // Worker/bridge JVM regressions stub Android logging/UI only; engine backends
+    // are explicit fakes and outgoing autoplay JSON uses a real JSON implementation.
+    testOptions.unitTests.isReturnDefaultValues = true
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -60,4 +63,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    testImplementation("io.github.libxposed:api:102.0.0")
 }

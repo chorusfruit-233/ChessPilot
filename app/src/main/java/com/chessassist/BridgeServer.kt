@@ -164,13 +164,14 @@ object BridgeServer {
         }
     }
 
-    fun pushBestmove(move: String, fen: String, autoplay: Boolean, autoplayDelayMs: Long) {
+    fun pushBestmove(move: String, fen: String, autoplay: Boolean, autoplayDelayMs: Long, ponderHit: Boolean = false) {
         push(JSONObject().apply {
             put("t", "bestmove")
             put("move", move)
             put("fen", fen)
             put("autoplay", if (autoplay) "1" else "0")
             put("autoplayDelay", autoplayDelayMs.toString())
+            put("source", if (ponderHit) "ponder" else "search")
         })
     }
 

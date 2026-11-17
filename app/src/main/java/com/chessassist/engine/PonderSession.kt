@@ -8,8 +8,9 @@ internal class PonderSession(
     val prediction: String,
     history: List<String>,
 ) {
-    private val history = history.toList()
+    @Volatile private var history = history.toList()
     val stopFlag = AtomicBoolean(false)
+    @Volatile private var cancelled = false
     @Volatile var thread: Thread? = null
     @Volatile var result: BestMove? = null
         private set
@@ -19,24 +20,43 @@ internal class PonderSession(
     }
 
     @Synchronized fun cancel() {
+        cancelled = true
         stopFlag.set(true)
         result = null
     }
 
+    /** Freeze completed work while stopping its reader, without discarding the cache. */
+    @Synchronized fun stopSearch() { stopFlag.set(true) }
+
+    /** The full game state may complete the source FEN's history after we started. */
+    @Synchronized fun updateSourceHistory(fen: String, moves: List<String>) {
+        if (!cancelled && this.fen == fen && moves.size > history.size &&
+            history.indices.all { moves[it].equals(history[it], ignoreCase = true) }) {
+            history = moves.toList()
+        }
+    }
+
     fun canKeep(fen: String, prediction: String): Boolean =
-        !stopFlag.get() && this.fen == fen && this.prediction == prediction &&
+        !cancelled && this.fen == fen && this.prediction == prediction &&
             (thread?.isAlive == true || result != null)
 
-    fun matches(fen: String, moves: List<String>): Boolean {
-        if (stopFlag.get()) return false
+    @Synchronized fun matches(fen: String, moves: List<String>): Boolean {
+        if (cancelled) return false
         val target = result?.positionFen
+        val targetMatches = target != null && samePosition(target, fen)
+        if (target != null && !targetMatches) return false
         // When a lesson omits move history, the engine's exact target position
         // can still confirm the hit. Otherwise require exactly one new move.
-        if (moves.isEmpty() && target != null) return samePosition(target, fen)
+        if (moves.isEmpty() && targetMatches) return true
+        // A raw FEN update can arrive before the opponent's move is appended.
+        // Only accept unchanged source history when the engine's complete target
+        // FEN independently confirms the prediction. Conflicting histories still fail.
+        if (targetMatches && moves.size == history.size &&
+            history.indices.all { moves[it].equals(history[it], ignoreCase = true) }) return true
         if (moves.size != history.size + 1 ||
             history.indices.any { !moves[it].equals(history[it], ignoreCase = true) } ||
             !moves.last().equals(prediction, ignoreCase = true)) return false
-        return target == null || samePosition(target, fen)
+        return true
     }
 
     companion object {
