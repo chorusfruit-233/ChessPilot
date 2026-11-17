@@ -120,7 +120,7 @@ object EngineLoop {
     // ---------------------------------------------------------- ponder -----
     // Think on the opponent's time: while it's their turn, search our reply to
     // the engine's predicted move (BestMove.ponder from the last analysis). If
-    // they play it, ponderhit returns the already-searched answer instantly;
+    // they play it, reuse a completed iteration without a new timed search;
     // anything else (or any failure) falls back to a normal search.
     //
     // ISOLATION (P0 fix for the wrong-move/freeze saga): ponder runs on a
@@ -136,27 +136,15 @@ object EngineLoop {
     // All ponder reads still block, so the ponder search owns a second thread;
     // the worker only ever joins it with timeouts, and a thread that survives
     // the join gets its whole PROCESS killed (never left as a zombie reader).
-    /**
-     * Hit-path grace beyond the ponder budget: the engine self-terminates by
-     * budget (see StockfishClient.ponder), so a hit lands within the remaining
-     * budget; only a genuinely wedged engine outlives budget+grace (then it is
-     * correctly killed for a fresh one). The old fixed 3 s join murdered
-     * healthy engines on every slow hit (bare `go ponder` never answers).
-     */
-    private const val PONDERHIT_GRACE_MS = 3000L
+    /** A hit finalizes already-searched work; it never waits out a new time budget. */
+    private const val PONDERHIT_JOIN_MS = 1000L
     private const val PONDER_STOP_JOIN_MS = 1500L
 
     /** Engine's predicted opponent reply from the last analysis (null = none). */
     @Volatile private var lastPonderMove: String? = null
-    /** In-flight ponder job (null = none). Guarded by worker-thread confinement. */
-    @Volatile private var ponderThread: Thread? = null
-    /** Single stop flag instance (set true to abort, false to arm). Never reassigned. */
-    private val ponderStop = AtomicBoolean(false)
-    @Volatile private var ponderFen: String? = null
-    @Volatile private var ponderMove: String? = null
-    @Volatile private var ponderGen = 0L
-    @Volatile private var ponderResult: BestMove? = null
-    @Volatile private var ponderResGen = -1L
+    @Volatile private var ponderSession: PonderSession? = null
+    @Volatile private var lastPonderHit: String? = null
+    @Volatile private var lastResultFromPonder = false
     /**
      * Last (fen|prediction) pushed to the hook's red arrow. Change-gated so the
      * opponent-turn branch (every 200 ms) doesn't spam the bridge; null clears.
@@ -204,43 +192,21 @@ object EngineLoop {
      * no join — main must never block on a socket reader).
      */
 
-    /** True while a ponder search thread is actually running. */
-    private fun isPonderLive(): Boolean {
-        return try {
-            ponderThread?.isAlive == true
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    /**
-     * Clear the in-flight ponder job identity + any unconsumed result.
-     * Deliberately keeps [ponderGen] monotonic and [lastPonderMove] (the
-     * prediction for the NEXT ponder round) — those are not job state.
-     */
-    private fun clearPonderState() {
-        ponderFen = null
-        ponderMove = null
-        ponderResult = null
-        ponderResGen = -1L
-    }
-
     /** Abort any in-flight ponder (idempotent, fast). */
     private fun ensurePonderStopped() {
-        val t = ponderThread
-        ponderThread = null
-        clearPonderState()
+        val session = ponderSession
+        ponderSession = null
+        val t = session?.thread
+        session?.cancel()
         if (t == null) return
         // FIRST: tell the reader loop to exit on its next line. WITHOUT this the
         // thread parks in readLine forever on its (now dead-end) reader.
-        ponderStop.set(true)
         if (!t.isAlive) return
         // Signal the PONDER process only — the main client must never see a
-        // ponder stop/isready pair (cross-talk on a shared stream was the old
+        // ponder stop (cross-talk on a shared stream was the old
         // wrong-move vector; separate processes make it impossible).
         try { ponderClient?.stopPonder() } catch (_: Throwable) {}
-        // Best-effort join: the stop+isready pair pushes a readyok line through
-        // the ponder reader, which then sees the flag and exits.
+        // stop finalizes the search, waking the reader to see its stop flag.
         if (Thread.currentThread() !== t) {
             try { t.join(PONDER_STOP_JOIN_MS) } catch (_: Throwable) {}
             if (t.isAlive) {
@@ -256,17 +222,6 @@ object EngineLoop {
                 ponderClient = null
             }
         }
-    }
-
-    /** UCI move match for ponder-hit: 4-char stem + promotion piece when present. */
-    private fun matchUci(historyMove: String?, predicted: String): Boolean {
-        if (historyMove == null) return false
-        if (historyMove.take(4) != predicted.take(4)) return false
-        if (predicted.length >= 5) {
-            val hp = historyMove.getOrNull(4) ?: return false
-            if (hp.lowercaseChar() != predicted[4].lowercaseChar()) return false
-        }
-        return true
     }
 
     /**
@@ -303,7 +258,7 @@ object EngineLoop {
      *   mid-handshake — creating the process without this check orphans it
      *   (nobody ever stops it again). Mirrors the main-client guard in runLoop.
      */
-    private fun maybePonder(fen: String, gen: Long) {
+    private fun maybePonder(fen: String, moves: List<String>, gen: Long) {
         try {
             if (!BridgeSettings.ponderEnabled) {
                 ensurePonderStopped()
@@ -321,8 +276,9 @@ object EngineLoop {
             // already; the red arrow must not wait for the search. Key-gated,
             // so this costs one message per (fen, prediction).
             pushPonderGuessOrClear(fen, r)
-            val t = ponderThread
-            if (fen == ponderFen && t != null && t.isAlive) return // already on it
+            // A finished result is still useful. Do not restart and erase it
+            // every 200 ms while the opponent is deciding.
+            if (ponderSession?.canKeep(fen, r) == true) return
             ensurePonderStopped()
             // P0 isolation: ponder gets its OWN engine (process or remote
             // connection). A ponder-engine failure only costs one ponder
@@ -335,23 +291,20 @@ object EngineLoop {
                 ponderClient = pc
             }
             val c = pc
-            val gen = ++ponderGen
-            ponderResult = null
-            ponderResGen = -1L
-            ponderFen = fen
-            ponderMove = r
-            ponderStop.set(false)
+            if (!running.get() || gen != workerGen) return
+            val session = PonderSession(fen, r, moves)
+            ponderSession = session
+            lastPonderHit = null
             val movetime = if (c is RemoteEngineClient) BridgeSettings.remoteMovetimeMs
                 else BridgeSettings.movetimeMs
             val depth = if (c is RemoteEngineClient) BridgeSettings.remoteDepth
                 else BridgeSettings.searchDepth
             Log.i(TAG, "ponder start (opp to move, our reply to $r)")
-            ponderThread = Thread({
+            session.thread = Thread({
                 try {
-                    val res = c.ponder(fen, r, movetime, depth, ponderStop)
+                    val res = c.ponder(fen, r, movetime, depth, session.stopFlag, session::update)
                     if (res != null) {
-                        ponderResult = res
-                        ponderResGen = gen
+                        session.update(res)
                         Log.i(TAG, "ponder finished: ${res.uci} (depth ${res.depth})")
                     } else {
                         Log.i(TAG, "ponder thread exit without result (stopped/deadline/eof)")
@@ -359,7 +312,9 @@ object EngineLoop {
                 } catch (t: Throwable) {
                     Log.w(TAG, "ponder thread died: ${t.message?.take(80)}")
                 }
-            }, "ponder").apply { isDaemon = true; start() }
+            }, "ponder").apply { isDaemon = true }
+            if (running.get() && gen == workerGen && !session.stopFlag.get()) session.thread?.start()
+            else ensurePonderStopped()
         } catch (_: Throwable) {
         }
     }
@@ -370,25 +325,25 @@ object EngineLoop {
      * to fall through to a normal analyse. Never throws; always leaves no live
      * ponder thread behind on the null path.
      *
-     * @param movetimeMs/depth the budget the ponder job was started with: the
-     *   hit join waits out the REMAINING budget (bounded), not a fixed 3 s.
+     * Completed PVs are cached before bestmove; hits use them immediately.
      */
     private fun tryConsumePonder(
-        fen: String, moves: List<String>, movetimeMs: Long, depth: Int,
+        fen: String, moves: List<String>,
     ): BestMove? {
         try {
-            val t = ponderThread ?: return null
-            val r = ponderMove
-            if (r == null) {
+            val session = ponderSession ?: return null
+            val t = session.thread ?: return null
+            val r = session.prediction
+            if (!BridgeSettings.ponderEnabled) {
                 ensurePonderStopped()
                 return null
             }
-            if (!t.isAlive && ponderResGen != ponderGen) {
+            if (!t.isAlive && session.result == null) {
                 // Died with nothing (engine crash mid-ponder): nothing to take.
                 ensurePonderStopped()
                 return null
             }
-            if (!matchUci(moves.lastOrNull(), r)) {
+            if (!session.matches(fen, moves)) {
                 Log.i(TAG, "ponder miss (opp played ${moves.lastOrNull()}, expected $r)")
                 ensurePonderStopped()
                 return null
@@ -396,22 +351,23 @@ object EngineLoop {
             // Ponder-hit goes to the PONDER process only. The main client keeps
             // whatever state it has (usually idle) — a hit must never disturb
             // an analysis or force a main-engine restart.
+            val startedAt = System.currentTimeMillis()
+            var res = session.result
             val cc = ponderClient
-            if (cc == null || !cc.isRunning()) {
+            if (res == null && (cc == null || !cc.isRunning())) {
                 // Ponder engine died/was dropped mid-ponder: nothing to hit, search fresh.
                 ensurePonderStopped()
                 return null
             }
             Log.i(TAG, "ponderhit! ($r)")
-            try { cc.signalPonderHit() } catch (_: Throwable) {}
-            // Bounded by the job's own budget: budgeted ponder self-terminates,
-            // so a healthy hit lands within the remainder (instant when the
-            // budget already elapsed while the opponent thought).
-            val joinMs = if (depth > 0) 20_000L else movetimeMs + PONDERHIT_GRACE_MS
-            try { t.join(joinMs) } catch (_: Throwable) {}
+            if (res == null) {
+                try { cc?.signalPonderHit() } catch (_: Throwable) {}
+                try { t.join(PONDERHIT_JOIN_MS) } catch (_: Throwable) {}
+                res = session.result
+            }
             val hung = t.isAlive
-            Log.i(TAG, "ponderhit join done (threadAlive=$hung resGen=$ponderResGen gen=$ponderGen)")
-            val res = if (ponderResGen == ponderGen) ponderResult else null
+            // Recheck against the engine's target FEN if it arrived during join.
+            val matched = session.matches(fen, moves)
             ensurePonderStopped()
             if (res == null) {
                 // Silence past budget+grace means the engine is genuinely
@@ -428,6 +384,7 @@ object EngineLoop {
                 }
                 return null
             }
+            if (!matched) return null
             // A newer our-turn position may have arrived during the join: never
             // publish a result against a fen it wasn't verified for.
             val fresh = synchronized(pendingLock) { pendingFen }
@@ -435,6 +392,7 @@ object EngineLoop {
                 Log.i(TAG, "ponder result stale (newer position), re-analysing")
                 return null
             }
+            lastPonderHit = "命中 $r → ${res.uci} · 深度${res.depth} · 取用${System.currentTimeMillis() - startedAt}ms"
             return res
         } catch (_: Throwable) {
             return null
@@ -681,9 +639,14 @@ object EngineLoop {
      */
     fun ponderLine(): String {
         if (!BridgeSettings.ponderEnabled) return "关"
-        val t = ponderThread
+        val session = ponderSession
+        val best = session?.result
+        val hit = lastPonderHit
         return when {
-            t != null && t.isAlive -> "ponder中（预测${ponderMove ?: lastPonderMove ?: "?"}）"
+            session != null && best != null -> "预测 ${session.prediction} → 应招 ${best.uci} · 深度${best.depth}" +
+                if (session.thread?.isAlive == true) "（已备好，继续深算）" else "（已备好）"
+            session?.thread?.isAlive == true -> "预测 ${session.prediction} · 预计算应招中…"
+            hit != null -> hit
             ponderClient?.isRunning() == true -> "待机（引擎在线）"
             else -> "开·引擎未启动"
         }
@@ -743,6 +706,7 @@ object EngineLoop {
         lastScoreUser = user
         lastDepth = best.depth
         lastPonderMove = best.ponder
+        lastResultFromPonder = ponderHit
         // A fresh result clears stale failure text (e.g. an old "Stream closed"
         // lingering on the status card long after recovery confuses everyone).
         lastError = null
@@ -750,7 +714,7 @@ object EngineLoop {
         val ponderNote = if (best.ponder != null) "，ponder ${best.ponder}" else ""
         note("最佳招法 ${best.uci}（深度${best.depth}，cp=${best.scoreCp}，$wr$ponderNote）")
         if (ponderHit) {
-            note("ponder 命中：对手走了预测招，即时应招")
+            note("极限思考${lastPonderHit.orEmpty()}，复用预计算结果")
         }
         // One combined command: the hook draws AND (if enabled) auto-plays it.
         BridgeServer.pushBestmove(
@@ -759,7 +723,7 @@ object EngineLoop {
         )
         OverlayManager.showBestMove(
             best.uci, fen, best.scoreCp, BridgeSettings.autoPlayEnabled, user,
-            best.depth
+            best.depth, ponderHit = ponderHit,
         )
     }
 
@@ -776,7 +740,8 @@ object EngineLoop {
         lastScoreUser = user
         lastError = null
         OverlayManager.showBestMove(
-            m, fen, lastScoreCp, BridgeSettings.autoPlayEnabled, user, lastDepth
+            m, fen, lastScoreCp, BridgeSettings.autoPlayEnabled, user, lastDepth,
+            ponderHit = lastResultFromPonder,
         )
         note("颜色修正：胜率视角已更新")
     }
@@ -978,6 +943,7 @@ object EngineLoop {
         var lastAnalysedTurn: String? = null
         var prevFen: String? = null
         var lastSkippedFen: String? = null
+        var lastWaitingDetail: String? = null
         fun isStale(): Boolean = gen != workerGen
         while (running.get() && !isStale()) {
             lastLoopAt = System.currentTimeMillis()
@@ -1008,11 +974,10 @@ object EngineLoop {
                     note("引擎已启动，等待对局局面…")
                     OverlayManager.showStatus("ChessPilot", "等待对局…")
                 }
-                val (fen, user, turn) = synchronized(pendingLock) {
-                    Triple(pendingFen, pendingUserColor, pendingTurnColor)
+                val (position, moves) = synchronized(pendingLock) {
+                    Triple(pendingFen, pendingUserColor, pendingTurnColor) to pendingMoves
                 }
-                // Volatile snapshot: onPosition replaces the whole list atomically.
-                val moves: List<String> = pendingMoves
+                val (fen, user, turn) = position
                 if (fen == null) {
                     maybeNoteStale()
                     Thread.sleep(60)
@@ -1037,6 +1002,8 @@ object EngineLoop {
                     lastDepth = 0
                     lastSkippedFen = null
                     lastPonderMove = null
+                    lastPonderHit = null
+                    lastResultFromPonder = false
                     lastPushedPonderKey = null
                     ensurePonderStopped()
                     // New game lifts the remote quarantine: if the previous
@@ -1104,7 +1071,7 @@ object EngineLoop {
                     // Opponent's clock is free thinking time when ponder is on.
                     // Start the job BEFORE painting so the overlay suffix below
                     // reflects the live job, not last iteration's state.
-                    maybePonder(fen, gen)
+                    maybePonder(fen, moves, gen)
                     if (fen != lastSkippedFen) {
                         lastSkippedFen = fen
                         // Turn flipped to the opponent: retire OUR yellow arrow
@@ -1115,20 +1082,14 @@ object EngineLoop {
                         // prediction" through fast opponent turns. Text
                         // conclusion survives in the overlay either way.
                         if (!isPonderPushedFor(fen)) BridgeServer.pushClear()
-                        // Mirror the ponder state on the floating overlay, only
-                        // while it's the opponent's turn: a live job appends
-                        // 极限思考中 to the waiting line. Title untouched.
-                        val conclusion = lastConclusionLine()
-                        // Show WHAT we're pondering, on its OWN second line: the
-                        // predicted enemy move (e.g. 极限思考（预测e7e5）).
-                        // ponderMove is the live job's prediction; fall back to
-                        // the last known prediction while a job spins up.
-                        val guess = (ponderMove ?: lastPonderMove)?.let { "极限思考（预测$it）" }
-                            ?: "极限思考中"
-                        val detail = if (isPonderLive()) {
-                            if (conclusion.isEmpty()) guess
-                            else "$conclusion\n$guess"
-                        } else conclusion
+                        lastWaitingDetail = null
+                    }
+                    // Update on new completed iterations too, not only a new FEN.
+                    val conclusion = lastConclusionLine()
+                    val guess = if (BridgeSettings.ponderEnabled) "极限思考：${ponderLine()}" else ""
+                    val detail = listOf(conclusion, guess).filter(String::isNotEmpty).joinToString("\n")
+                    if (detail != lastWaitingDetail) {
+                        lastWaitingDetail = detail
                         OverlayManager.clear("等待对手走棋…", detail)
                     }
                     // Reachable even when positions keep arriving: a perpetual
@@ -1143,16 +1104,9 @@ object EngineLoop {
                 // answer is already searched — publish it instead of searching.
                 // Anything unconsumed (miss/stale/failure) stops the job so the
                 // normal search below owns the engine alone.
-                // Hit-join budget follows the PONDER engine (remote sliders
-                // drive the PC ponder); the analyse budget below follows the
-                // main client — the two can transiently differ after a
-                // fallback, and must not leak into each other.
-                val pc0 = ponderClient
-                val pmt = if (pc0 is RemoteEngineClient) BridgeSettings.remoteMovetimeMs
-                    else BridgeSettings.movetimeMs
-                val pdp = if (pc0 is RemoteEngineClient) BridgeSettings.remoteDepth
-                    else BridgeSettings.searchDepth
-                val pondered = tryConsumePonder(fen, moves, pmt, pdp)
+                // A prepared reply bypasses the normal timed search below.
+                lastWaitingDetail = null
+                val pondered = tryConsumePonder(fen, moves)
                 if (pondered != null) {
                     lastLoopAt = System.currentTimeMillis()
                     if (isStale()) return

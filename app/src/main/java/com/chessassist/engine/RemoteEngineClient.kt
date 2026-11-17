@@ -166,7 +166,7 @@ class RemoteEngineClient : EngineClient {
     }
 
     private fun resultOf(o: JSONObject): BestMove? {
-        if (o.optString("t") != "result") return null
+        if (o.optString("t") !in listOf("result", "ponder_info")) return null
         val uci = o.optString("uci").ifEmpty { null } ?: return null
         return BestMove(
             uci = uci,
@@ -174,6 +174,7 @@ class RemoteEngineClient : EngineClient {
             scoreCp = if (o.isNull("scoreCp")) null else o.optInt("scoreCp"),
             depth = o.optInt("depth", 0),
             isMate = o.optBoolean("isMate", false),
+            positionFen = o.optString("fen").takeIf { !o.isNull("fen") && it.isNotEmpty() },
         )
     }
 
@@ -243,7 +244,7 @@ class RemoteEngineClient : EngineClient {
 
     override fun ponder(
         fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
-        stopFlag: AtomicBoolean,
+        stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit,
     ): BestMove? {
         if (!isRunning()) return null
         val id = ++reqId
@@ -281,7 +282,10 @@ class RemoteEngineClient : EngineClient {
                 // answer; the reply flows back through THIS reader (same as
                 // the local client) so the ponder thread exits WITH it.
                 // Stale lines (late answers to older ids) are skipped like analyse.
-                if (o.optString("t") == "result") {
+                if (o.optString("t") == "ponder_info") {
+                    if (o.optInt("id", -1) != id) continue
+                    resultOf(o)?.let(onUpdate)
+                } else if (o.optString("t") == "result") {
                     if (o.has("id") && o.optInt("id", id) != id) continue
                     return resultOf(o)
                 }

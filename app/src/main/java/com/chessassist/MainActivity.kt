@@ -336,7 +336,7 @@ class MainActivity : Activity() {
         }
         funcSection.body.addView(berserkRow.root)
         funcSection.body.addView(Ui.hairline(this))
-        ponderRow = Ui.switchRow(this, "极限思考", "对手走棋时同步预测，功耗提高",
+        ponderRow = Ui.switchRow(this, "极限思考", "提前算好预测后的应招，命中即复用，功耗提高",
             BridgeSettings.ponderEnabled) { on ->
             BridgeSettings.ponderEnabled = on
             BridgeSettings.save(this@MainActivity)

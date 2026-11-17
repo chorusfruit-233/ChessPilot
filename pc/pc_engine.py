@@ -15,11 +15,12 @@ Protocol (UTF-8 JSON, one object per line, phone -> this server):
       omit them. Threads/hash stay server-side (need a process restart).
   {"t":"ponder","id":N,"fen":"...","ponderMove":"e7e5",
    "movetimeMs":M,"depth":D}
-      -> starts `go ponder [movetime M | depth D]` (WITH a budget — bare
-      `go ponder` is infinite by UCI design and a hit would never answer);
-      no immediate reply (reply arrives via ponderhit, within budget).
+      -> starts `go ponder [movetime M | depth D]` and streams completed PVs:
+         {"t":"ponder_info","id":N,"uci":"g1f3","ponder":"b8c6",
+          "scoreCp":25,"depth":18,"isMate":false,"fen":"<predicted position>"}.
+      The phone can reuse this prepared reply when the prediction is confirmed.
   {"t":"ponderhit","id":M}
-      -> {"t":"result","id":N,...} (the pondered reply, usually instant).
+      -> sends UCI stop to finalize searched work, then {"t":"result","id":N,...}.
       NOTE the id echo: the reply carries the PONDER command's id (N), not
       the hit's (M) — the phone matches replies to its ponder reader.
   {"t":"stop","id":N}   -> cancels the running search, {"t":"stopped","id":N}.
@@ -128,7 +129,8 @@ class Engine:
         self.hash_mb = hash_mb
         self.movetime_ms = movetime_ms
         self.depth = depth
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.stop_lock = threading.Lock()
         self.proc = None
         self.lines = queue.Queue()
         self.reader = None
@@ -145,24 +147,25 @@ class Engine:
         self.ponder_req_id = None
         # Drain fence for the sniffer (see _sync).
         self.syncing = False
-        # Budget (s) of the running ponder job: sizes the ponderhit wait
-        # (engine self-terminates by budget, so the hit answers fast).
-        self.ponder_budget = 190.0
         # Ponder score accumulators (fed by the sniffer thread, read on
         # bestmove): a ponder-hit result needs score/depth too, otherwise the
         # phone shows "-" winrate and trips its shallow-depth alarm.
         self._sniff_score = None
         self._sniff_mate = False
         self._sniff_depth = 0
+        self.ponder_update = None
+        self.ponder_fen = None
+        self.sniffer_stop = threading.Event()
 
     # -- lifecycle ------------------------------------------------------
     def start(self):
+        self.sniffer_stop = threading.Event()
         self.proc = subprocess.Popen(
             [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         self.alive = True
-        self.reader = threading.Thread(target=self._read_loop, daemon=True)
+        self.reader = threading.Thread(target=self._read_loop, args=(self.proc, self.lines), daemon=True)
         self.reader.start()
         self._send("uci")
         if not self._wait_prefix("uciok", 15):
@@ -176,25 +179,40 @@ class Engine:
         log(f"engine up: {self.engine_name} "
             f"(threads={self.threads} hash={self.hash_mb}MB "
             f"movetime={self.movetime_ms}ms depth={self.depth or 'time-based'})")
+        threading.Thread(target=_ponder_sniffer, args=(self, self.sniffer_stop), daemon=True).start()
 
     def stop(self):
+        # Disconnect cleanup and server shutdown can both stop this process.
+        # Wait for the first cleanup to reap it before the server can exit.
+        with self.stop_lock:
+            self._stop()
+
+    def _stop(self):
+        self.sniffer_stop.set()
         self.alive = False
+        proc = self.proc
+        self.proc = None
+        if proc is None:
+            return
         try:
-            if self.proc and self.proc.stdin:
-                self.proc.stdin.write("quit\n")
-                self.proc.stdin.flush()
+            if proc.stdin:
+                proc.stdin.write("quit\n")
+                proc.stdin.flush()
         except Exception:
             pass
         try:
-            if self.proc:
-                self.proc.wait(timeout=3)
+            proc.wait(timeout=3)
         except Exception:
             try:
-                if self.proc:
-                    self.proc.kill()
+                proc.kill()
+                proc.wait(timeout=3)
             except Exception:
                 pass
-        self.proc = None
+        if self.reader is not threading.current_thread() and self.reader is not None:
+            self.reader.join(timeout=1)
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                stream.close()
 
     def restart(self):
         log("restarting engine...")
@@ -207,7 +225,6 @@ class Engine:
         self.ponder_result = None
         self.ponder_event.clear()
         self.ponder_req_id = None
-        self.ponder_budget = 190.0
         self.syncing = False
         self.start()
 
@@ -218,20 +235,20 @@ class Engine:
         self.proc.stdin.write(cmd + "\n")
         self.proc.stdin.flush()
 
-    def _read_loop(self):
+    def _read_loop(self, proc, lines):
         try:
-            for line in self.proc.stdout:
+            for line in proc.stdout:
                 line = line.strip()
                 if not line:
                     continue
                 if line.startswith("id name "):
                     self.engine_name = line[len("id name "):]
                     continue
-                self.lines.put(line)
+                lines.put(line)
         except Exception:
             pass
         finally:
-            self.lines.put(None)  # EOF marker
+            lines.put(None)  # EOF belongs to this process, never its replacement.
 
     def _wait_prefix(self, prefix, timeout):
         end = time.time() + timeout
@@ -255,6 +272,9 @@ class Engine:
         try:
             try:
                 self._send("stop")
+                # SF19 answers isready even while its search is still stopping.
+                # setoption waits for search completion, fencing old bestmove.
+                self._send("setoption name MultiPV value 1")
                 self._send("isready")
             except Exception:
                 return False
@@ -372,7 +392,7 @@ class Engine:
                 f"score={res['scoreCp']} ({dt:.2f}s)")
             return res
 
-    def ponder(self, req_id, fen, ponder_move, movetime_ms=0, depth=0):
+    def ponder(self, req_id, fen, ponder_move, movetime_ms=0, depth=0, on_update=None):
         with self.lock:
             if not self._sane_fen(fen):
                 return {"t": "error", "id": req_id,
@@ -382,26 +402,26 @@ class Engine:
                 if not self._sync():
                     return {"t": "error", "id": req_id,
                             "message": "engine unresponsive"}
-            # Bare `go ponder` is INFINITE by UCI design (ponderhit just flips
-            # it to a normal infinite search) — a hit would then never answer.
-            # Always ponder WITH a budget so the engine self-terminates and
-            # the hit reply arrives within the remaining budget.
+            # Stream completed PVs while Stockfish withholds bestmove. A hit
+            # finalizes the current work with stop, without another time budget.
             use_d = depth if depth > 0 else self.depth
             use_mt = movetime_ms if movetime_ms > 0 else self.movetime_ms
             if use_d > 0:
-                go, budget = f"go ponder depth {use_d}", 180.0
+                go = f"go ponder depth {use_d}"
             elif use_mt > 0:
-                go, budget = f"go ponder movetime {use_mt}", use_mt / 1000.0
+                go = f"go ponder movetime {use_mt}"
             else:
-                go, budget = "go ponder", 180.0
+                go = "go ponder"
             self.pondering = True
             self.ponder_result = None
             self.ponder_event.clear()
             self.ponder_req_id = req_id
-            self.ponder_budget = budget
+            self.ponder_update = on_update
+            self.ponder_fen = None
             self._sniff_reset()
             try:
                 self._send(f"position fen {fen} moves {ponder_move}")
+                self._send("d")
                 self._send(go)
             except Exception as e:
                 self.pondering = False
@@ -416,16 +436,13 @@ class Engine:
                 return {"t": "error", "id": req_id,
                         "message": "not pondering"}
             try:
-                self._send("ponderhit")
+                self._send("stop")
             except Exception as e:
                 self.pondering = False
                 return {"t": "error", "id": req_id, "message": f"send: {e}"}
-        # Wait outside the lock? No — single-job discipline keeps it simple:
-        # nothing else can run concurrently on this connection anyway. But the
-        # reader thread keeps feeding the queue; bestmove may already wait.
-        # Bounded by the job's own budget + slack (the engine terminates
-        # itself; anything beyond is a genuine wedge → resync + fail loud).
-        if self.ponder_event.wait(timeout=self.ponder_budget + 10):
+        # The sniffer needs this lock to consume bestmove, so wait outside it.
+        # stop finalizes the existing iteration; do not wait out another budget.
+        if self.ponder_event.wait(timeout=3):
             self.pondering = False
             res = self.ponder_result
             self.ponder_result = None
@@ -453,6 +470,7 @@ class Engine:
             self.ponder_result = None
             self.ponder_event.clear()
             self.ponder_req_id = None
+            self.ponder_update = None
             try:
                 self._send("stop")
             except Exception:
@@ -466,6 +484,8 @@ class Engine:
     def _sniff_info(self, line):
         """Fold one ponder-time `info` line into the accumulators (same score
         discipline as the phone: last pv score wins, mate tracked)."""
+        if self.ponder_fen is None:
+            return
         try:
             d = int(line[len("info depth "):].split()[0])
             self._sniff_depth = max(self._sniff_depth, d)
@@ -483,11 +503,18 @@ class Engine:
                 self._sniff_score = int(line.split(" score mate ")[1].split()[0]) * 10000
             except (ValueError, IndexError):
                 pass
+        if " pv " in line and "lowerbound" not in line and "upperbound" not in line:
+            pv = line.split(" pv ", 1)[1].split()
+            if pv and self.ponder_update is not None and self.ponder_fen is not None:
+                self.ponder_update({"t": "ponder_info", "id": self.ponder_req_id,
+                                    "uci": pv[0], "ponder": pv[1] if len(pv) > 1 else None,
+                                    "scoreCp": self._sniff_score, "depth": self._sniff_depth,
+                                    "isMate": self._sniff_mate, "fen": self.ponder_fen})
 
     def _sniff_bestmove(self, line):
         """Mid-ponder bestmove (mate found / depth-ponder done): capture it
         for the ponderhit fast path. Stale lines (not pondering) are dropped."""
-        if not self.pondering or self.ponder_event.is_set():
+        if not self.pondering or self.ponder_event.is_set() or self.ponder_fen is None:
             return
         parts = line.split()
         uci = parts[1] if len(parts) > 1 else None
@@ -497,7 +524,7 @@ class Engine:
         self.ponder_result = {"t": "result", "id": -1, "uci": uci,
                               "ponder": ponder, "scoreCp": self._sniff_score,
                               "depth": self._sniff_depth,
-                              "isMate": self._sniff_mate}
+                              "isMate": self._sniff_mate, "fen": self.ponder_fen}
         self.ponder_event.set()
 
 
@@ -506,6 +533,12 @@ class Engine:
 def handle_conn(conn, addr, engine):
     log(f"phone connected: {addr[0]}:{addr[1]}")
     f = conn.makefile("r", encoding="utf-8", errors="replace")
+    send_lock = threading.Lock()
+
+    def respond(result):
+        with send_lock:
+            conn.sendall((json.dumps(result) + "\n").encode("utf-8"))
+
     try:
         for raw in f:
             raw = raw.strip()
@@ -526,7 +559,8 @@ def handle_conn(conn, addr, engine):
                     res = engine.ponder(rid, o.get("fen", ""),
                                         o.get("ponderMove", ""),
                                         o.get("movetimeMs", 0) or 0,
-                                        o.get("depth", 0) or 0)
+                                        o.get("depth", 0) or 0,
+                                        on_update=respond)
                     if res is None:
                         continue  # ponder runs; answer comes via ponderhit
                 elif t == "ponderhit":
@@ -546,10 +580,12 @@ def handle_conn(conn, addr, engine):
             except Exception as e:
                 res = {"t": "error", "id": rid, "message": str(e)[:200]}
             try:
-                conn.sendall((json.dumps(res) + "\n").encode("utf-8"))
+                respond(res)
             except OSError:
                 break
     finally:
+        engine.stop()
+        f.close()
         try:
             conn.close()
         except OSError:
@@ -572,13 +608,9 @@ def main():
     a = ap.parse_args()
 
     binary = ensure_engine(a.engine)
-    engine = Engine(binary, a.threads, a.hash, a.movetime, a.depth)
-    try:
-        engine.start()
-    except Exception as e:
-        sys.exit(f"engine failed to start: {e}")
-
     if a.selftest:
+        engine = Engine(binary, a.threads, a.hash, a.movetime, a.depth)
+        engine.start()
         startpos = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         # Temporarily shorten the budget for the smoke test.
         engine.movetime_ms = min(engine.movetime_ms, 1000)
@@ -587,13 +619,6 @@ def main():
         engine.stop()
         ok = isinstance(res, dict) and res.get("t") == "result"
         sys.exit(0 if ok else 1)
-
-    # During `go ponder` nobody consumes the engine queue (analyse is idle),
-    # so a mid-ponder bestmove (mate found / depth-ponder done) would sit in
-    # the queue and confuse the NEXT job. The sniffer folds ponder-time lines
-    # into the fast-path result instead. Single-job discipline makes this
-    # race-free: no analyse runs while pondering is true.
-    threading.Thread(target=_ponder_sniffer, args=(engine,), daemon=True).start()
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -604,21 +629,39 @@ def main():
     srv.listen(4)
     log(f"listening on {a.host}:{a.port} — enter this IP:port in the "
         f"ChessPilot app (backend settings). Ctrl+C to stop.")
+    engines = set()
+    engines_lock = threading.Lock()
+
+    def serve(conn, addr):
+        # Main analysis and pondering use separate phone connections. Sharing
+        # a single process here allowed one connection to stop the other's job.
+        engine = Engine(binary, a.threads, a.hash, a.movetime, a.depth)
+        with engines_lock:
+            engines.add(engine)
+        try:
+            engine.start()
+            handle_conn(conn, addr, engine)
+        except Exception as exc:
+            log(f"connection failed: {exc}")
+        finally:
+            engine.stop()
+            conn.close()
+            with engines_lock:
+                engines.discard(engine)
     try:
         while True:
             conn, addr = srv.accept()
-            threading.Thread(target=handle_conn, args=(conn, addr, engine),
+            threading.Thread(target=serve, args=(conn, addr),
                              daemon=True).start()
     except KeyboardInterrupt:
         log("shutting down...")
     finally:
-        try:
-            engine.stop()
-        except Exception:
-            pass
+        with engines_lock:
+            for engine in engines:
+                engine.stop()
 
 
-def _ponder_sniffer(engine):
+def _ponder_sniffer(engine, stop_event):
     """Fold ponder-time engine output into the fast-path result.
 
     Polls gently (20 Hz) and only while a ponder job is open without a result
@@ -626,21 +669,34 @@ def _ponder_sniffer(engine):
     Everything else (readyok, stray chatter) is dropped — the next _sync()
     drains to a clean readyok anyway, so nothing stale survives.
     """
-    while True:
-        time.sleep(0.05)
-        if not engine.pondering or engine.syncing or engine.ponder_event.is_set():
-            continue
-        try:
-            line = engine.lines.get_nowait()
-        except queue.Empty:
-            continue
-        if line is None:  # EOF: wake the ponderhit waiter to fail loud
-            engine.ponder_event.set()
-            continue
-        if line.startswith("info depth "):
-            engine._sniff_info(line)
-        elif line.startswith("bestmove"):
-            engine._sniff_bestmove(line)
+    while not stop_event.is_set():
+        time.sleep(0.02)
+        # Check state and consume under the same lock used by sync/cancel.
+        # Drain a batch so info cannot queue up behind a 20-Hz single-line poll.
+        with engine.lock:
+            if stop_event.is_set():
+                break
+            if not engine.pondering or engine.syncing or engine.ponder_event.is_set():
+                continue
+            for _ in range(128):
+                try:
+                    line = engine.lines.get_nowait()
+                except queue.Empty:
+                    break
+                if line is None:
+                    engine.ponder_event.set()
+                    break
+                if line.startswith("Fen: "):
+                    engine.ponder_fen = line[len("Fen: "):].strip()
+                elif line.startswith("info depth "):
+                    try:
+                        engine._sniff_info(line)
+                    except OSError:
+                        engine.ponder_update = None
+                elif line.startswith("bestmove"):
+                    engine._sniff_bestmove(line)
+                    if engine.ponder_event.is_set():
+                        break
         # else: readyok/stray — drop (sync drains explicitly).
 
 
