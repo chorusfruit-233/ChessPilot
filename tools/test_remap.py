@@ -81,8 +81,17 @@ class RemapTests(unittest.TestCase):
         field.get_descriptor.return_value = "Ljava/lang/String;"
         state.get_fields.return_value = [field]
         state.get_methods.return_value = []
+        setup = Mock()
+        setup.get_name.return_value = "Lnx5;"
+        setup.get_fields.return_value = []
+        setup.get_methods.return_value = []
+        for name, descriptor in (("a", "Ljava/lang/String;"), ("b", "Ljava/util/List;"), ("c", "Z")):
+            member = Mock()
+            member.get_name.return_value = name
+            member.get_descriptor.return_value = descriptor
+            setup.get_fields.return_value.append(member)
         dex = Mock()
-        dex.get_classes.return_value = [state]
+        dex.get_classes.return_value = [state, setup]
         with self.assertRaisesRegex(ValueError, "chessGameState layout changed"):
             verify_runtime_layout({"classes.dex": dex}, {
                 "chessGameState": "Lox5;", "chessFen": "Ldm5;", "setupModel": "Lnx5;",

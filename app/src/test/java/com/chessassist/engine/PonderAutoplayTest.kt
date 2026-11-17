@@ -96,6 +96,62 @@ class PonderAutoplayTest {
         reader.invoke(BridgeServer, snapshot.toString())
     }
 
+    @Test fun openingSurvivesNativeSetupAndReachesTheEngineOverTheSocket() {
+        val board = StateBridge()
+        val model = NativeSetup(null, listOf(NativeMove("e2e4"), NativeMove("e7e5")), true)
+        val controller = Any()
+        // Duolingo constructs the live state inside setup, before the after hook.
+        board.onGameState(NativeState(NativeFen(target), model, NativeColor.WHITE, NativeColor.WHITE, model.b))
+        val provisionalId = board.gameId
+        assertEquals(target, board.lastFen)
+        board.onBoardSetup(controller, model = model) // The live getter did not return a state.
+        assertNotEquals(provisionalId, board.gameId)
+        assertTrue(board.canPlay(board.gameId, target))
+        val opening = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals(board.gameId, opening.getString("game"))
+        assertEquals(target, opening.getString("fen"))
+        assertEquals("e2e4 e7e5", opening.getString("moves"))
+
+        BridgeServer.start()
+        try {
+            BridgeClient.ensureStarted()
+            startWorker()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+            while (main.analyses.get() == 0 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(BridgeServer.hookConnected())
+            assertEquals(target, EngineLoop.snapshot().fen)
+            assertEquals(1, main.analyses.get())
+        } finally {
+            val disconnected = BridgeClient.stopForReload()
+            BridgeServer.stop()
+            assertTrue("Hook bridge client did not stop", disconnected)
+        }
+    }
+
+    @Test fun setupModelSuppliesAnOpeningWhenNoStateCallbackRuns() {
+        val board = StateBridge()
+        val controller = Any()
+        val model = NativeSetup(source, listOf(NativeMove("e2e4")), false)
+        board.onBoardSetup(controller, model = model)
+        val opening = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals(source, opening.getString("fen"))
+        assertEquals("b", opening.getString("turn"))
+        assertEquals("w", opening.getString("user"))
+        assertEquals("e2e4", opening.getString("moves"))
+        board.onGameState(NativeState(NativeFen(source), model, NativeColor.WHITE, NativeColor.BLACK, model.b))
+        board.acceptExternalFen(target)
+        board.onBoardSetup(controller, model = model)
+        assertEquals(target, board.lastFen)
+
+        val newController = Any()
+        board.onBoardSetup(newController, model = NativeSetup(null, emptyList(), true))
+        val startpos = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        assertEquals(startpos, board.lastFen)
+        assertEquals("w", board.lastUserColor)
+        assertFalse(board.onBoardSetup(controller, model = NativeSetup(source, emptyList(), true)))
+        assertEquals(startpos, board.lastFen)
+    }
+
     @Test fun timeoutWithoutFenChangeCancelsAnalysisAndDiscardsItsLateReply() {
         val board = StateBridge()
         val controller = Any()
@@ -205,8 +261,11 @@ class PonderAutoplayTest {
         assertEquals("REPETITION", reconnect.getString("end"))
         assertEquals("DRAW", reconnect.getString("outcome"))
         assertFalse(reloaded.canPlay(oldGameId, target))
+        val model = NativeSetup(null, listOf(NativeMove("e2e4"), NativeMove("e7e5")), true)
+        reloaded.onGameState(NativeState(NativeFen(target), model, NativeColor.WHITE, NativeColor.WHITE, model.b))
+        reloaded.onBoardSetup(controller, model = model) // Initial setup is still the ended controller.
+        assertFalse(reloaded.canPlay(oldGameId, target))
         reloaded.onBoardSetup(controller, "mini-two")
-        reloaded.acceptExternalFen(target)
         reloaded.onEngineGameEnd(oldGameId, target, GameEnd("NO_LEGAL_MOVES"))
         assertNotEquals(oldGameId, reloaded.gameId)
         assertFalse(reloaded.canPlay(oldGameId, target))
@@ -348,6 +407,18 @@ class PonderAutoplayTest {
             reader.join(2000)
         }
     }
+
+    // Layout read from the mapped Duolingo classes by StateBridge.
+    private class NativeSetup(val a: String?, val b: List<NativeMove>, val c: Boolean)
+    private class NativeFen(private val fen: String) { fun b() = fen }
+    private class NativeMove(private val uci: String) { fun b() = uci }
+    private enum class NativeColor(private val symbol: String) {
+        WHITE("W"), BLACK("B");
+        fun getSymbol() = symbol
+    }
+    private class NativeState(
+        val a: NativeFen, val c: NativeSetup, val d: NativeColor, val e: NativeColor, val f: List<NativeMove>,
+    )
 
     private class FakeEngine : EngineClient {
         val analyses = AtomicInteger()
