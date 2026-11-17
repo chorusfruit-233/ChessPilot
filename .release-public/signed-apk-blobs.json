@@ -1,0 +1,87 @@
+{
+  "name": "ChessPilot-0.6.1-arm64-v8a.apk",
+  "sha256": "5e66118b62af2a2e9f6fc8555fb1fa168bc154b264195f4dd357b56b05fea715",
+  "size": 81501720,
+  "chunks": [
+    {
+      "sha": "b419d7588d5f6a7e84626a20bb2794a007d6b6ad",
+      "size": 4194304
+    },
+    {
+      "sha": "63b887b70d98511d76a1b1412f6bc2a3c736bc65",
+      "size": 4194304
+    },
+    {
+      "sha": "ea2bef68ffbe588de64faffdc294b25fa0d83804",
+      "size": 4194304
+    },
+    {
+      "sha": "5d832ffc7d7512a7fb53b05bd05538f15e2a804d",
+      "size": 4194304
+    },
+    {
+      "sha": "9533b27996427aea1e766f65216b16fa79b9b0ce",
+      "size": 4194304
+    },
+    {
+      "sha": "344354e2761e71722828f11e7104b4df2e0101a2",
+      "size": 4194304
+    },
+    {
+      "sha": "846ac4a3276133b76de24cf46b800f62ff4328b4",
+      "size": 4194304
+    },
+    {
+      "sha": "31e3222d9f7feca4b3cf8c72bbf5fdc3a32dfb54",
+      "size": 4194304
+    },
+    {
+      "sha": "5d28fdc2732a1f6b08d032d7992c998df8380f91",
+      "size": 4194304
+    },
+    {
+      "sha": "30c84de511084bd8e900b39d0b9805304ef5840b",
+      "size": 4194304
+    },
+    {
+      "sha": "359dff3033fc0e92dbf5a3e3d775c2b8c7cd0b10",
+      "size": 4194304
+    },
+    {
+      "sha": "2b1a9a75128b290363b88f6223fd8f992e1e91cc",
+      "size": 4194304
+    },
+    {
+      "sha": "44861a37d4a28b045c4a0a701ff62a13beafbee8",
+      "size": 4194304
+    },
+    {
+      "sha": "87049add4b471b0db8f890f36eb30a62db289142",
+      "size": 4194304
+    },
+    {
+      "sha": "634bb9836111d5daf7af8b293fe2e592af1d8bed",
+      "size": 4194304
+    },
+    {
+      "sha": "720a8aa2b54ba829db66e8b2b40df755b316e2f6",
+      "size": 4194304
+    },
+    {
+      "sha": "764fc6a8275fa6e4066c235c58bd8d14225a2d89",
+      "size": 4194304
+    },
+    {
+      "sha": "c9c2441aaaca41b6def913da23755c84cb71ba65",
+      "size": 4194304
+    },
+    {
+      "sha": "5ec5fc923a02c7beac188f82575037ae8ea7fb2a",
+      "size": 4194304
+    },
+    {
+      "sha": "49eeefb0e3f9647431f11ef83f0bcb186b21ff7e",
+      "size": 1809944
+    }
+  ]
+}
