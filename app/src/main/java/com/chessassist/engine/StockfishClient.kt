@@ -38,7 +38,7 @@ interface EngineClient {
     /** Ponder our reply to the predicted move until hit/stop. Null on failure. */
     fun ponder(
         fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
-        stopFlag: AtomicBoolean,
+        stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit,
     ): BestMove?
     /** Signal ponderhit: the opponent played our predicted move. Best-effort. */
     fun signalPonderHit()
@@ -343,15 +343,13 @@ class StockfishClient(private val context: Context) : EngineClient {
      * abort promptly (it then pushes a readyok through to unblock this read).
      * No watchdog here — lifetime is stop-driven, bounded by PONDER_MAX_MS.
      *
-     * ALWAYS ponders with a budget (movetime/depth): bare `go ponder` is
-     * INFINITE by UCI design (ponderhit just flips it to a normal infinite
-     * search), so a hit would hang forever waiting for a bestmove that never
-     * comes. With a budget the engine self-terminates and the hit reply lands
-     * within the remaining budget (instant when the budget already elapsed).
+     * Stockfish withholds bestmove while pondering and ignores movetime until
+     * the hit. Publish each completed PV now; a hit can use that reply without
+     * waiting for another timed search. stop finalizes any in-flight search.
      */
     override fun ponder(
         fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
-        stopFlag: AtomicBoolean
+        stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit,
     ): BestMove? {
         if (!running.get()) return null
         // Same poison-FEN defense as analyse(): SF 19 terminates the process on
@@ -366,7 +364,19 @@ class StockfishClient(private val context: Context) : EngineClient {
         synchronized(lock) { r = reader }
         if (r == null) return null
         try {
+            // Drain output from the cancelled round before accepting a new PV.
+            send("stop")
+            // SF19 handles isready during search; setoption first waits for
+            // search completion, so readyok also fences the old bestmove.
+            send("setoption name MultiPV value 1")
+            send("isready")
+            if (!awaitLine("readyok", IDLE_TIMEOUT_MS)) {
+                stop()
+                return null
+            }
+            if (stopFlag.get()) return null
             send("position fen $fen moves $ponderMove")
+            send("d") // Target FEN for validating the eventual real board.
         } catch (_: Throwable) {
             return null
         }
@@ -381,6 +391,7 @@ class StockfishClient(private val context: Context) : EngineClient {
         var lastScoreCp: Int? = null
         var lastScoreIsMate = false
         var pdepth = 0
+        var positionFen: String? = null
         val deadline = System.currentTimeMillis() + PONDER_MAX_MS
         try {
             while (running.get() && !stopFlag.get() && System.currentTimeMillis() < deadline) {
@@ -390,7 +401,9 @@ class StockfishClient(private val context: Context) : EngineClient {
                     break
                 } ?: break
                 when {
+                    line.startsWith("Fen: ") -> positionFen = line.removePrefix("Fen: ").trim()
                     line.startsWith("info depth ") -> {
+                        if (positionFen == null) continue
                         line.substringAfter("info depth ").substringBefore(' ')
                             .toIntOrNull()?.let { if (it > pdepth) pdepth = it }
                         if (line.contains(" score cp ")) {
@@ -406,11 +419,14 @@ class StockfishClient(private val context: Context) : EngineClient {
                                 lastScoreIsMate = true
                             }
                         }
+                        PonderInfo.parse(line, positionFen)?.let(onUpdate)
                     }
                     line.startsWith("bestmove") -> {
                         val uci = line.split(' ').getOrNull(1)
                         val ponder = line.split(" ponder ").getOrNull(1)?.trim()
-                        best = uci?.let { BestMove(it, ponder, lastScoreCp, pdepth, lastScoreIsMate) }
+                        if (positionFen != null) {
+                            best = uci?.let { BestMove(it, ponder, lastScoreCp, pdepth, lastScoreIsMate, positionFen) }
+                        } else continue
                         break
                     }
                 }
@@ -423,17 +439,14 @@ class StockfishClient(private val context: Context) : EngineClient {
 
     /** Signal ponderhit: the opponent played our predicted move. Best-effort. */
     override fun signalPonderHit() {
-        try { send("ponderhit") } catch (_: Throwable) {}
+        // A completed iteration is already available: stop returns that work
+        // immediately, including in movetime mode (ponderhit alone keeps searching).
+        try { send("stop") } catch (_: Throwable) {}
     }
 
-    /**
-     * Abort a ponder read from another thread: stop the search, then push an
-     * isready whose readyok unblocks the reader (a bare stop leaves it parked
-     * on readLine with an idle engine and no output coming).
-     */
+    /** Abort the active ponder: stop emits bestmove and unblocks its reader. */
     override fun stopPonder() {
         try { send("stop") } catch (_: Throwable) {}
-        try { send("isready") } catch (_: Throwable) {}
     }
 
     private fun awaitLine(prefix: String, timeoutMs: Long): Boolean {
@@ -466,4 +479,5 @@ class StockfishClient(private val context: Context) : EngineClient {
 data class BestMove(
     val uci: String, val ponder: String?, val scoreCp: Int?, val depth: Int = 0,
     val isMate: Boolean = false,
+    val positionFen: String? = null,
 )

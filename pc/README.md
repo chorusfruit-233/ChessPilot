@@ -5,7 +5,8 @@
 ## 它是什么
 
 `pc_engine.py`：一个 TCP 服务（默认 `0.0.0.0:41718`），后面挂一个桌面
-Stockfish 进程。纯 Python 标准库，零依赖，Python 3.8+ 直接跑。
+Stockfish 进程，每个连接独立，主分析与极限思考互不停止对方搜索。
+纯 Python 标准库，零依赖，Python 3.8+ 直接跑。
 
 ## 快速开始（3 步）
 
@@ -49,11 +50,25 @@ py -3 pc_engine.py --selftest
 | `--depth` | `0` | 默认固定深度（0 = 按时间思考） |
 | `--selftest` | — | 开局冒烟测试后退出 |
 
+`--threads` 和 `--hash` 按每个进程配置。开启极限思考时手机会使用两个连接，
+即两个引擎进程；例如 `--hash 1024` 共预留约 2 GiB 置换表内存。
+
 ## 协议（给排障看的，手机侧 `RemoteEngineClient` 对接）
 
 UTF-8 JSON，一行一个。`analyse`/`ponder`/`ponderhit`/`stop`/`ping`/`info`
-进，`result`/`stopped`/`pong`/`info`/`error` 出。单任务纪律：
-同一时间只有一个搜索在跑，新分析先 `stop` 旧的再开工。
+进，`result`/`ponder_info`/`stopped`/`pong`/`info`/`error` 出。
+每个连接一次只跑一个搜索，新分析先停止本连接的旧任务。
+
+极限思考会持续回传 `ponder_info`，包含预测后的目标 FEN、预备应招、下一预测、
+分数与深度。手机在预测命中时直接复用已完成的搜索；`ponderhit` 请求则用 UCI
+`stop` 提取已有搜索的最终结果，不再等待一次完整的思考时长。
+使用这项修复时需同时更新伴侣 App 0.5.1 和本脚本，再重启电脑服务。
+
+真实引擎回归测试（指定已下载的 Stockfish，无第三方测试依赖）：
+
+```sh
+STOCKFISH_BIN=/path/to/stockfish python -m unittest discover -s pc -v
+```
 
 ## 排障
 

@@ -358,14 +358,15 @@ object OverlayManager {
     fun showBestMove(
         uci: String, fen: String, scoreCp: Int? = null,
         autoplay: Boolean = false, userColor: String? = null,
-        depth: Int = 0,
+        depth: Int = 0, ponderHit: Boolean = false,
     ) {
         val stm = fen.split(' ').getOrNull(1)
         val line2 = ChessMath.formatWinRate(scoreCp, stm, userColor)
         // Depth prefix = engine-health readout (single digits at long think
         // times mean the engine is throttled/starved — check 狂暴/threads).
         // Color discipline (B1) untouched: the whole line keeps win-rate color.
-        val detail = if (depth > 0) "深度$depth · $line2" else line2
+        val detail = (if (ponderHit) "预测命中 · " else "") +
+            if (depth > 0) "深度$depth · $line2" else line2
         val rate = ChessMath.userWinRate01(scoreCp, stm, userColor)
         val title = if (autoplay) "自动走棋中：$uci" else "推荐：$uci"
         main.post {
@@ -393,6 +394,7 @@ object OverlayManager {
             val cur = titleTv?.text.toString()
             if (cur.startsWith("推荐") || cur.startsWith("自动走棋中") ||
                 cur.startsWith("等待走棋中") || cur.startsWith("ChessPilot") ||
+                cur.startsWith("等待对手走棋") ||
                 cur.startsWith("局面停滞")
             ) {
                 titleTv?.text = reason

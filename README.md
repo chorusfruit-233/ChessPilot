@@ -26,7 +26,7 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 | ➡️ | **推荐箭头** | 直接画在多邻国棋盘上：金色＝推荐招法，红色＝预测对手的应招 |
 | 🤖 | **自动走棋** | 可选自动落子（带延迟可调），或悬浮窗按钮半自动确认 |
 | 🖥️ | **电脑算力** | 手机连电脑 Stockfish 19（NNUE），断线自动秒切回手机本地引擎 |
-| 🧠 | **极限思考** | ponder：对手思考时预判他的招法，命中则瞬时出招 |
+| 🧠 | **极限思考** | 提前算出预测后的应招，显示准备招法和深度，命中直接复用 |
 | 🔥 | **狂暴模式** | 线程拉满 ＋ 大内存，深算到底（悬浮窗红框角标） |
 | 📊 | **控制台** | 对局雷达卡、FEN 小棋盘、事件终端，每个状态都看得见 |
 
@@ -46,7 +46,7 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 2. LSPosed 里启用模块，作用域勾选**多邻国**，重启手机
 3. 打开伴侣 App，点一次「启动引擎服务」（通知权限给一下）→ 进多邻国开一局，金色箭头就出现了
 
-适配 `6.105.2` 时，模块须使用本适配分支的构建（见「自己构建」）；上游旧版 `0.5` 发布包仍使用 `6.85.7` 映射。伴侣 App 可以沿用。覆盖安装模块须沿用原签名密钥。
+适配 `6.105.2` 时，模块须使用已适配的构建（见「自己构建」）；上游旧版 `0.5` 模块仍使用 `6.85.7` 映射。极限思考修复需使用伴侣 App `0.5.1`；已适配的模块可沿用。覆盖安装须沿用原签名密钥。
 
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
@@ -110,7 +110,7 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 # 3. 本地 debug.keystore 签名 → dist/
 ```
 
-Linux/macOS 可用 `sh gradlew.sh :module:assembleDebug` 构建模块（JDK 17+、Android SDK 34；首次构建需联网）。此适配不修改伴侣 App 或桥接协议，可以继续使用原有伴侣 App。
+Linux/macOS 可用 `sh gradlew.sh :module:assembleDebug` 构建模块（JDK 17+、Android SDK 34；首次构建需联网）。仅更新多邻国版本映射时可沿用旧伴侣；极限思考修复需构建并更新 `app`，使用远程算力时还需更新电脑脚本。
 
 多邻国升级导致混淆名变了？不用慌：`tools/remap.py` 可以从新 APK 再生映射表，流程见逆向笔记。
 

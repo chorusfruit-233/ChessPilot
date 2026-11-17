@@ -53,10 +53,10 @@ object BridgeSettings {
     /**
      * 极限思考 Ponder (think on the opponent's time): while waiting for the
      * opponent, search our reply to the engine's predicted move; if they play
-     * it, the answer is instant via ponderhit. Default OFF: it runs the CPU
+     * it, reuse the latest completed search iteration. Default OFF: it runs the CPU
      * ~100% of the game (heat/battery) instead of ~50%. No restart needed on
      * toggle — the loop reads this flag live every iteration. While a ponder
-     * job is live, the floating overlay's waiting line carries 极限思考中.
+     * job is live, the overlay shows the prediction, prepared reply and depth.
      */
     @Volatile var ponderEnabled: Boolean = false
 

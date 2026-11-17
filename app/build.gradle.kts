@@ -11,8 +11,8 @@ android {
         applicationId = "com.chessassist"
         minSdk = 27
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 6
+        versionName = "0.5.1"
         ndk {
             // Stockfish builds for arm64 (NNUE needs NEON); armeabi-v7a optional but slow.
             abiFilters += listOf("arm64-v8a")
@@ -55,4 +55,5 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
+    testImplementation("junit:junit:4.13.2")
 }
