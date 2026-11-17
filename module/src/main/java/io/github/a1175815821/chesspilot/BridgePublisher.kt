@@ -147,17 +147,20 @@ object BridgePublisher {
 
     // lastAnalyzedFen stays FEN-only: ArrowPainter's staleness gate and autoplay
     // freshness compare against move FENs, so this must never become a composite.
-    // Turn/user corrections travel via a SEPARATE publish key below.
-    @Volatile private var lastPublishKey: String? = null
+    // Metadata corrections, including delayed move history, travel in this key.
+    private data class PublishKey(
+        val fen: String, val turn: String?, val user: String?, val moves: List<String>,
+    )
+    @Volatile private var lastPublishKey: PublishKey? = null
 
+    @Synchronized
     fun publishSnapshot(fen: String, userColor: String?, turnColor: String?, moves: List<String>) {
-        // Change detection on (fen, turn, user): hooks fire at frame rate (render
-        // polling, ctor copies) with the SAME state — same triple ⇒ silence. But a
-        // turn/user correction for an unchanged FEN (lagging fields catching up)
-        // MUST be republished, or the companion's skip decision on the old triple
-        // sticks forever with no new trigger to revisit it.
+        // FEN construction precedes the game-state constructor. The first FEN
+        // therefore often carries the previous history; the completed state must
+        // republish its corrected moves even when FEN and both colors are equal.
+        // Keep an immutable history copy so later list mutation cannot change the key.
         // (Companion restarts are covered by BridgeClient's reconnect flush.)
-        val key = "$fen|${turnColor ?: "?"}|${userColor ?: "?"}"
+        val key = PublishKey(fen, turnColor, userColor, moves.toList())
         if (key == lastPublishKey) {
             pubDup++
             return

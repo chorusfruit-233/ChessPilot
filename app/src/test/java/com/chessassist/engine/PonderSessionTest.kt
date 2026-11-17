@@ -63,6 +63,41 @@ class PonderSessionTest {
         assertFalse(job.matches(source, emptyList()))
     }
 
+    @Test fun unchangedSourceHistoryRequiresAnExactTargetFen() {
+        val job = session()
+        assertFalse(job.matches(target, listOf("e2e4"))) // No engine target yet.
+        job.update(prepared())
+        assertTrue(job.matches(target, listOf("e2e4")))
+        assertFalse(job.matches(source, listOf("e2e4")))
+        assertFalse(job.matches(target, listOf("d2d4")))
+    }
+
+    @Test fun sourceHistoryCorrectionDoesNotDiscardCompletedIterations() {
+        val job = PonderSession(source, "e7e5", emptyList())
+        job.update(prepared())
+        job.updateSourceHistory(source, listOf("e2e4"))
+        assertEquals(18, job.result?.depth)
+        assertTrue(job.matches(target, listOf("e2e4", "e7e5")))
+        job.updateSourceHistory(target, listOf("e2e4", "e7e5"))
+        job.updateSourceHistory(source, listOf("d2d4", "d7d5"))
+        assertTrue(job.matches(target, listOf("e2e4", "e7e5")))
+        assertFalse(job.matches(target, listOf("d2d4", "d7d5", "e7e5")))
+    }
+
+    @Test fun stoppingTheSearchFreezesTheReplyUntilItIsConsumedOrCancelled() {
+        val job = session()
+        job.update(prepared())
+        job.stopSearch()
+        job.update(prepared().copy(uci = "b1c3", depth = 30))
+        assertTrue(job.stopFlag.get())
+        assertEquals("g1f3", job.result?.uci)
+        assertTrue(job.canKeep(source, "e7e5"))
+        assertTrue(job.matches(target, listOf("e2e4", "e7e5")))
+        job.cancel()
+        assertNull(job.result)
+        assertFalse(job.matches(target, listOf("e2e4", "e7e5")))
+    }
+
     @Test fun promotionSuffixMustMatch() {
         val job = PonderSession(source, "e7e8q", emptyList())
         assertFalse(job.matches(target, listOf("e7e8n")))
