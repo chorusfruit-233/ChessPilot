@@ -309,6 +309,7 @@ object BridgeServer {
                     end = end,
                 )
             }
+            "adapter" -> EngineLoop.onHookAdapterStatus(o.optString("status").take(240))
             "ack" -> EngineLoop.onArrowAck(o.optString("drawn"))
             "help" -> EngineLoop.onNeedHelp(o.optString("code"), o.optString("move"))
         }

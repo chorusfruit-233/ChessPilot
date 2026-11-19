@@ -1,6 +1,28 @@
-# Duolingo Chess — Reverse-Engineering Map (v6.105.2)
+# Duolingo Chess — Reverse-Engineering Map
 
-## Current APK: 6.105.2 / versionCode 2497
+## Runtime mapping for 6.105.2 and 6.106.3
+
+ChessPilot 0.6.4 selects the bundled profiles by the base APK's DEX fingerprint.
+For a different fingerprint, `DexRemapper` uses DexKit 2.3.0 on the installed APK.
+It finds chess model classes using the labels in their `toString()` methods,
+then matches the board and session methods by type, signature and references.
+It checks the layouts used by the state and result readers before installing
+the hooks. The control screen reports the installed version and any failure.
+
+| Interface | 6.105.2 (2497) | 6.106.3 (2501) |
+|---|---|---|
+| Board setup and live state | `mz6.O(nx5)` and `mz6.J()` | `qe7.P(ca6)` and `qe7.J()` |
+| Full FEN and UCI move | `dm5.b()` and `gf6.b()` | `xx5.c()` and `kt6.d()` |
+| PvP result | `tr6.G(ar6, pq8)` | `o67.G(t57, l89)` |
+| Mini match start and result | `k25.j(bd6)` and `k25.m(…)` | `bd5.j(zq6)` and `bd5.m(…)` |
+
+The bundled profiles in `module/src/main/assets/dex-profiles.json` were obtained
+by running the Kotlin resolver through DexKit's desktop JNI library on the
+actual base APKs. Each profile records the base APK SHA-256. The fingerprint
+is SHA-256 over the DEX entries sorted by name, with one UTF-8 line containing
+name, uncompressed size and CRC32 for each entry.
+
+## Earlier reference APK: 6.105.2 / versionCode 2497
 
 Source: the fork's draft release asset `_6.105.2.apks` (base + arm64_v8a +
 xxxhdpi). Bundle SHA-256:

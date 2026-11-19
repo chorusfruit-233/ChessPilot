@@ -114,11 +114,13 @@ class PonderAutoplayTest {
 
         BridgeServer.start()
         try {
+            BridgeClient.sendAdapterStatus("多邻国 6.106.3 · 棋盘接口已匹配")
             BridgeClient.ensureStarted()
             startWorker()
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
             while (main.analyses.get() == 0 && System.nanoTime() < deadline) Thread.sleep(10)
             assertTrue(BridgeServer.hookConnected())
+            assertTrue(EngineLoop.snapshot().hookLine.contains("多邻国 6.106.3"))
             assertEquals(target, EngineLoop.snapshot().fen)
             assertEquals(1, main.analyses.get())
         } finally {
@@ -126,6 +128,30 @@ class PonderAutoplayTest {
             BridgeServer.stop()
             assertTrue("Hook bridge client did not stop", disconnected)
         }
+    }
+
+    @Test fun renamed1063GettersPublishFenAndHistory() {
+        val board = StateBridge(fenGetter = "c", moveGetter = "d")
+        val model = NativeSetup(null, emptyList(), true)
+        val state = NativeState(
+            NativeFen1063(target), model, NativeColor.WHITE, NativeColor.WHITE,
+            listOf(NativeMove1063("e2e4"), NativeMove1063("e7e5")),
+        )
+        board.onBoardSetup(Any(), model = model, liveState = state)
+        val position = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals(target, position.getString("fen"))
+        assertEquals("e2e4 e7e5", position.getString("moves"))
+        deliver(position)
+        assertEquals(target, EngineLoop.snapshot().fen)
+    }
+
+    @Test fun openingWithoutFenDoesNotMarkAPositionAsReceived() {
+        EngineLoop.onPosition(source, "w", "b", history, "has-position")
+        assertTrue(EngineLoop.lastPositionAt > 0)
+        deliver(JSONObject().put("t", "position").put("game", "opening").put("fen", ""))
+        assertEquals(0L, EngineLoop.lastPositionAt)
+        assertNull(EngineLoop.currentFen)
+        assertNull(EngineLoop.snapshot().staleMinOrNull)
     }
 
     @Test fun setupModelSuppliesAnOpeningWhenNoStateCallbackRuns() {
@@ -412,12 +438,14 @@ class PonderAutoplayTest {
     private class NativeSetup(val a: String?, val b: List<NativeMove>, val c: Boolean)
     private class NativeFen(private val fen: String) { fun b() = fen }
     private class NativeMove(private val uci: String) { fun b() = uci }
+    private class NativeFen1063(private val fen: String) { fun c() = fen }
+    private class NativeMove1063(private val uci: String) { fun d() = uci }
     private enum class NativeColor(private val symbol: String) {
         WHITE("W"), BLACK("B");
         fun getSymbol() = symbol
     }
     private class NativeState(
-        val a: NativeFen, val c: NativeSetup, val d: NativeColor, val e: NativeColor, val f: List<NativeMove>,
+        val a: Any, val c: NativeSetup, val d: NativeColor, val e: NativeColor, val f: List<Any>,
     )
 
     private class FakeEngine : EngineClient {

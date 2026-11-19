@@ -2,67 +2,68 @@ package io.github.a1175815821.chesspilot
 
 import android.content.Context
 import org.json.JSONObject
+import org.luckypray.dexkit.DexKitBridge
+import org.luckypray.dexkit.wrap.DexMethod
+import java.io.File
+import java.lang.reflect.Method
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 
-/**
- * Cross-version class resolution.
- *
- * R8 renames every internal class each release, so hard-coded names like `wq4` break on
- * update. remap.json lists candidate names per logical role; the first that resolves wins.
- * Kept (unobfuscated) names like `com.duolingo.chess.model.ChessPieceType` are stable.
- * Regenerate remap.json with tools/remap.py when Duolingo updates (then rebuild: the
- * table is baked into [RemapTable] at compile time by generateRemapTable).
- */
-class Remap private constructor(private var map: JSONObject) {
-
-    private fun candidatesFor(key: String): org.json.JSONArray? {
-        // remap.json nests entries under top-level "classes" (see tools/remap.py output);
-        // accept both nested and flat layouts so hand-written tables keep working.
-        map.optJSONArray(key)?.let { return it }
-        map.optJSONObject("classes")?.optJSONArray(key)?.let { return it }
-        return null
-    }
-
-    /**
-     * Resolution cache INCLUDING negative results: a stale key used to re-throw
-     * ClassNotFoundException per candidate on every draw/clear call (exception
-     * construction is not cheap). The baked table is immutable per process, so
-     * caching (even misses) is safe.
-     */
+/** The class and method descriptors for the selected target APK. */
+class Remap private constructor(map: JSONObject) {
+    private val classes = map.getJSONObject("classes")
+    private val methods = map.getJSONObject("methods")
     private val classCache = HashMap<String, Class<*>?>()
 
     fun resolveClass(loader: ClassLoader, key: String): Class<*>? = synchronized(classCache) {
-        if (classCache.containsKey(key)) return classCache[key]
-        val candidates = candidatesFor(key)
-        var resolved: Class<*>? = null
-        if (candidates != null) {
-            for (i in 0 until candidates.length()) {
-                val name = candidates.optString(i)
-                if (name.isNullOrEmpty()) continue
-                val dotted = name.replace('/', '.')
-                try {
-                    resolved = Reflect.findClass(dotted, loader)
-                    break
-                } catch (_: Throwable) { /* try next candidate */ }
-            }
+        classCache.getOrPut(key) {
+            val name = classes.optString(key).takeIf { it.isNotEmpty() } ?: return@getOrPut null
+            Reflect.findClass(name, loader)
         }
-        classCache[key] = resolved
-        resolved
     }
 
-    fun resolveClassOrNull(loader: ClassLoader, key: String): Class<*>? = resolveClass(loader, key)
+    fun methodName(key: String): String = descriptor(key).name
 
-    /** Method names also change between builds (e.g. reset arrows: r -> c0). */
-    fun methodNames(key: String): List<String> {
-        val names = map.optJSONObject("methods")?.optJSONArray(key) ?: return emptyList()
-        return (0 until names.length()).mapNotNull { names.optString(it).takeIf(String::isNotEmpty) }
+    fun method(loader: ClassLoader, key: String): Method {
+        val expected = descriptor(key)
+        val actual = expected.getMethodInstance(loader)
+        check(DexMethod(actual) == expected) { "$key signature changed" }
+        return actual.apply { isAccessible = true }
     }
+
+    internal fun verify(loader: ClassLoader) {
+        for (key in classes.keys()) resolveClass(loader, key)
+        for (key in methods.keys()) method(loader, key)
+    }
+
+    private fun descriptor(key: String) = DexMethod(methods.getString(key))
 
     companion object {
-        /**
-         * Primary load path: the compile-time-baked table (always in sync with
-         * module/src/main/assets/remap.json, zero runtime I/O, zero permissions).
-         */
-        fun fromBaked(): Remap = Remap(JSONObject(RemapTable.JSON))
+        fun forApk(apkPath: String, moduleLibraryDir: String?): Remap {
+            val known = JSONObject(RemapTable.JSON).optJSONObject(dexFingerprint(apkPath))
+            if (known != null) return Remap(known)
+            try {
+                System.loadLibrary("dexkit")
+            } catch (e: UnsatisfiedLinkError) {
+                val dir = moduleLibraryDir ?: throw e
+                System.load(File(dir, System.mapLibraryName("dexkit")).absolutePath)
+            }
+            return DexKitBridge.create(apkPath).use { dex ->
+                dex.setThreadNum(2)
+                Remap(DexRemapper(dex).discover())
+            }
+        }
+
+        /** Use the DEX entries so split selection or resource packaging does not affect the match. */
+        internal fun dexFingerprint(apkPath: String): String = ZipFile(apkPath).use { apk ->
+            val files = apk.entries().asSequence().filter { DEX_FILE.matches(it.name) }.sortedBy { it.name }.toList()
+            check(files.isNotEmpty()) { "no DEX in installed APK" }
+            val index = files.joinToString("\n") { "${it.name}:${it.size}:${it.crc}" }
+            MessageDigest.getInstance("SHA-256").digest(index.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
+
+        private val DEX_FILE = Regex("classes\\d*\\.dex")
     }
 }
 

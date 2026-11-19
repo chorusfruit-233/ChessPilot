@@ -55,6 +55,7 @@ object BridgeClient {
     private val queue = LinkedBlockingQueue<JSONObject>(MAX_QUEUE)
 
     @Volatile private var lastSnapshot: JSONObject? = null
+    private var adapterStatus: JSONObject? = null
     private val snapshotLock = Any()
 
     /** Fully retire this generation's socket readers/writers before allowing reload. */
@@ -80,6 +81,7 @@ object BridgeClient {
             activeSocket = null
             out = null
             lastSnapshot = null
+            adapterStatus = null
             queue.clear()
         }
         return stopped
@@ -122,6 +124,12 @@ object BridgeClient {
             put("t", "ack")
             put("drawn", uci)
         })
+    }
+
+    fun sendAdapterStatus(status: String) = synchronized(snapshotLock) {
+        val update = JSONObject().put("t", "adapter").put("status", status)
+        adapterStatus = update
+        enqueue(update)
     }
 
     /**
@@ -194,6 +202,7 @@ object BridgeClient {
                 synchronized(snapshotLock) {
                     synchronized(sendLock) { out = o }
                     // Reconnect flush and live snapshots must stay in order.
+                    adapterStatus?.let { enqueue(it) }
                     lastSnapshot?.let { enqueue(it) }
                 }
                 backoff = 1000L
