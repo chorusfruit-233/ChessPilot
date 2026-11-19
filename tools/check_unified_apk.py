@@ -33,11 +33,21 @@ def dex_classes(data):
     return types, classes
 
 
-def check_elf(data):
+def check_arm64_alignment(data):
     assert data[:6] == b"\x7fELF\x02\x01", "Expected little-endian ELF64"
-    assert struct.unpack_from("<H", data, 18)[0] == 183, "Engine must be AArch64"
-    phoff, shoff = struct.unpack_from("<QQ", data, 32)
-    phsize, phnum, shsize, shnum, names_index = struct.unpack_from("<HHHHH", data, 54)
+    assert struct.unpack_from("<H", data, 18)[0] == 183, "Expected an AArch64 library"
+    phoff = struct.unpack_from("<Q", data, 32)[0]
+    phsize, phnum = struct.unpack_from("<HH", data, 54)
+    for index in range(phnum):
+        segment = struct.unpack_from("<IIQQQQQQ", data, phoff + index * phsize)
+        if segment[0] == 1:
+            assert segment[7] >= 16384, "ELF LOAD segments must support 16 KB pages"
+
+
+def check_elf(data):
+    check_arm64_alignment(data)
+    shoff = struct.unpack_from("<Q", data, 40)[0]
+    shsize, shnum, names_index = struct.unpack_from("<HHH", data, 58)
     headers = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + index * shsize)
                for index in range(shnum)]
     names_header = headers[names_index]
@@ -52,10 +62,6 @@ def check_elf(data):
     for name in ("armv8_init", "armv8_dotprod_init"):
         variant = sections[name]
         assert variant[3] >= init[3] + init[5] or variant[3] + variant[5] <= init[3]
-    for index in range(phnum):
-        segment = struct.unpack_from("<IIQQQQQQ", data, phoff + index * phsize)
-        if segment[0] == 1:
-            assert segment[7] >= 16384, "ELF LOAD segments must support 16 KB pages"
     assert b"info string ChessPilot CPU " in data
 
 
@@ -84,13 +90,15 @@ def main():
                 classes.update(dex_definitions)
         assert classes["L" + entry.replace(".", "/") + ";"] == "Lio/github/libxposed/api/XposedModule;"
         for required in ["Lcom/chessassist/ChessPilotApp;", "Lcom/chessassist/MainActivity;",
-                         "Lio/github/libxposed/service/XposedProvider;"]:
+                         "Lio/github/libxposed/service/XposedProvider;",
+                         "Lorg/luckypray/dexkit/DexKitBridge;"]:
             assert required in classes, f"Missing unified app component {required}"
         assert not any(name.startswith("Lio/github/libxposed/api/") for name in classes), "Framework API must remain compileOnly"
         assert not any(name.startswith("Lde/robv/android/xposed/") for name in types), "Legacy Xposed references remain"
-        engines = [name for name in apk.namelist() if name.startswith("lib/") and name.endswith(".so")]
-        assert engines == ["lib/arm64-v8a/libstockfish.so"], f"Unexpected engine packaging: {engines}"
-        engine = apk.read(engines[0])
+        libraries = {name for name in apk.namelist() if name.startswith("lib/") and name.endswith(".so")}
+        assert libraries == {"lib/arm64-v8a/libstockfish.so", "lib/arm64-v8a/libdexkit.so"}, libraries
+        check_arm64_alignment(apk.read("lib/arm64-v8a/libdexkit.so"))
+        engine = apk.read("lib/arm64-v8a/libstockfish.so")
     check_elf(engine)
     if args.nnue:
         net = args.nnue.read_bytes()

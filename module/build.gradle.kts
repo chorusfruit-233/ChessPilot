@@ -25,34 +25,27 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 dependencies {
     // Supplied by the framework in the target process; never package the API.
     compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("org.luckypray:dexkit:2.3.0")
     testImplementation("junit:junit:4.13.2")
 }
 
-// Bake module/src/main/assets/remap.json into generated Kotlin (RemapTable) so the
-// hook always resolves classes without ANY runtime I/O: assets/ are invisible to the
-// module ClassLoader inside the target process, and createPackageContext() for our own
-// package from Duolingo always throws NameNotFoundException on Android 11+ (package
-// visibility: Duolingo's manifest has no <queries> for us). The documented update flow
-// stays "tools/remap.py -> rebuild module".
+// Package the profiles from the audited APKs with the module code. The target
+// process may not have access to the module's Android resources or assets.
 val generateRemapTable by tasks.registering {
-    val input = file("src/main/assets/remap.json")
+    val input = file("src/main/assets/dex-profiles.json")
     val outDir = layout.buildDirectory.dir("generated/remap/io/github/a1175815821/chesspilot")
     inputs.file(input)
     outputs.dir(outDir)
     doLast {
         val dir = outDir.get().asFile.apply { mkdirs() }
         val json = input.readText(Charsets.UTF_8)
-        val versionKey = "\"appVersion\""
-        val version = json.substringAfter(versionKey).substringAfter("\"").substringBefore("\"")
-            .ifEmpty { "unknown" }
         // Escape for a Kotlin triple-quoted string: backslashes first, then dollar signs.
         val dollar = '$'
         val escaped = json.replace("\\", "\\\\").replace("$", dollar + "{'$'}")
         val tq = "\"\"\""
         val body = "package io.github.a1175815821.chesspilot\n\n" +
-            "/** Auto-generated from module/src/main/assets/remap.json - DO NOT EDIT. */\n" +
+            "/** Auto-generated from module/src/main/assets/dex-profiles.json. */\n" +
             "internal object RemapTable {\n" +
-            "    const val APP_VERSION = \"" + version + "\"\n" +
             "    const val JSON = " + tq + escaped + tq + "\n" +
             "}\n"
         File(dir, "RemapTable.kt").writeText(body, Charsets.UTF_8)

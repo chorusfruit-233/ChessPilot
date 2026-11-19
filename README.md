@@ -39,9 +39,9 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 ## 🚀 快速上手（3 分钟）
 
-前提：手机已 root，并装好**支持 libxposed API 102 的 Xposed 框架**。旧版只支持 API 82/100/101 的 LSPosed 不能加载本版。当前适配多邻国 `6.105.2`（arm64），已核对 APK 接口并通过构建，尚待真机验证；`6.85.7` 是旧版模块的实测基准。
+手机需要 root 和支持 **libxposed API 102** 的框架。当前适配多邻国 `6.105.2` 和 `6.106.3`（arm64），均已核对真实 APK 接口。新版的真机联动待验证。
 
-1. 安装 **ChessPilot 0.6.2 合包 APK**（包名仍为 `com.chessassist`），模块、引擎和控制页都在这一包里。
+1. 安装 **ChessPilot 0.6.4 合包 APK**。包名为 `com.chessassist`，包含模块、引擎和控制页。
 2. 从旧版迁移时，在框架管理器中停用原来的独立模块，再启用新的 **ChessPilot**，作用域只选**多邻国**，将多邻国结束运行后重开一次。
 3. 打开 ChessPilot，点「启动引擎服务」（允许通知）→ 进多邻国开一局。状态页可查看模块连接和实际 CPU 路径。
 
@@ -53,25 +53,15 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 `0.6.3` 保留开局初始化时取得的棋盘状态，修复 Hook 已连接、控制页却一直显示「等待对局」的问题。
 
+`0.6.4` 适配多邻国 6.106.3，并在启动时按实际 APK 选择棋盘、招法和结算接口。更新 APK 后，DexKit 可以重新定位仍符合已验证结构的接口。控制页的「Hook 连接」会显示实际版本和匹配结果。
+
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
 ## 🧪 适配环境
 
-Hook 依赖多邻国内部的混淆名，`remap.json` 针对下面的具体构建生成，包含类名及箭头清理方法名。当前映射已与安装包的类定义、方法签名和局面字段布局核对，模块通过构建；原生箭头显示和自动走棋仍需在 LSPosed 真机上验证。
+适配多邻国 `com.duolingo` 的 ARM64 构建 6.105.2（2497）和 6.106.3（2501）。这两版的映射按 DEX 指纹选择。其他构建会在本机用 DexKit 查找接口，检查字段和完整方法签名后注册 Hook。匹配结果出现缺失或歧义时，控制页会显示实际版本和原因。
 
-| 项 | 值 |
-|---|---|
-| 应用 | 多邻国 `com.duolingo` |
-| 版本 | **6.105.2**（`versionCode 2497`） |
-| 架构 | arm64-v8a（`.apks` 含 3 个 split：base / arm64_v8a / xxxhdpi） |
-| 适配用安装包 | 草稿 release 的 `_6.105.2.apks`，SHA-256 `cfd396e2b50c91ac050bfe3e9e37bd88632171936f84f96be545f2dca39e7c51` |
-| 映射表基准 | `module/src/main/assets/remap.json` → `"appVersion": "6.105.2"` |
-| 验证范围 | APK 静态接口核验、重映射回归测试、模块构建；未进行真机验证 |
-
-旧版 `6.85.7`（`versionCode 2396`）的真机记录保留在逆向笔记中。当前映射只包含 `6.105.2` 的已确认名称；旧的短混淆名在新版可能对应其他类，不能直接作为跨版本候选。
-
-> **为什么源码仓库里没有这个安装包**：它是多邻国的版权作品，公开分发属于侵权；且该 `.apks` 约 132 MiB，超过 GitHub 单文件 100 MB 的硬限制，推上去会被直接拒绝。
-> 想复现当前适配环境，装 **6.105.2**；提 issue 时带上版本号和 LSPosed 日志，方便判断是不是版本差异。
+接口定位、指纹和两版方法的对照见 [逆向笔记](docs/REVERSE_ENGINEERING.md)。DexKit 2.3.0 的源码以及 Java 接口、原生库的许可见 [对应源码](https://github.com/LuckyPray/DexKit/tree/c9cd12a14b75409bebd2f73e4dfc5ff575df3eb8)。许可文本随 APK 打包。
 
 ## 🖥️ 想更强？连电脑算力（可选）
 

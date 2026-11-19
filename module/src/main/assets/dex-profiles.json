@@ -1,0 +1,74 @@
+{
+  "264400b8069c91616a28d9dad98a15d86eb1be99ed56d7305271c76dcef30682": {
+    "appVersion": "6.106.3",
+    "appVersionCode": 2501,
+    "baseSha256": "f6fdf2b7c8350e2e9b0d74202b44b59c16ee7d0a0ede28776c8592ed9043e6d2",
+    "classes": {
+      "arrowColor": "com.duolingo.chess.model.rive.ArrowColor",
+      "arrowType": "com.duolingo.chess.model.rive.ArrowType",
+      "boardController": "qe7",
+      "botSession": "com.duolingo.feature.chess.match.j",
+      "chessFen": "xx5",
+      "chessGameState": "da6",
+      "chessSession": "fj7",
+      "miniGame": "bd5",
+      "miniSession": "ms6",
+      "move": "kt6",
+      "pvpSession": "o67",
+      "setupModel": "ca6",
+      "square": "gg5"
+    },
+    "methods": {
+      "botExit": "Lcom/duolingo/feature/chess/match/j;->N(Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;)V",
+      "botGameEnd": "Lcom/duolingo/feature/chess/match/j;->I(Lcom/duolingo/feature/chess/match/j;Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;Ljava/lang/Integer;ZLcom/duolingo/data/chess/match/network/ChessMatchEndCondition;Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;Ll89;I)Ljava/lang/Object;",
+      "clearArrows": "Lqe7;->f0()V",
+      "drawArrow": "Lqe7;->k0(Lgg5;Lgg5;ZLcom/duolingo/chess/model/rive/ArrowType;ILcom/duolingo/chess/model/rive/ArrowColor;)V",
+      "fullFen": "Lxx5;->c()Ljava/lang/String;",
+      "liveState": "Lqe7;->J()Lda6;",
+      "miniGameEnd": "Lbd5;->m(Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;Lcom/duolingo/data/chess/match/network/ChessMatchEndCondition;)V",
+      "miniGameStart": "Lbd5;->j(Lzq6;)V",
+      "miniSessionEnd": "Lms6;->F()V",
+      "moveUci": "Lkt6;->d()Ljava/lang/String;",
+      "pvpGameEnd": "Lo67;->G(Lt57;Ll89;)Ljava/lang/Object;",
+      "sessionCleared": "Lfj7;->onCleared()V",
+      "sessionController": "Lfj7;->l()Lqe7;",
+      "setupBoard": "Lqe7;->P(Lca6;)V"
+    }
+  },
+  "684f64a1a2ee541e40fb9dc0e663fff99a34c9b7ed1f281f69fb24720d13dcef": {
+    "appVersion": "6.105.2",
+    "appVersionCode": 2497,
+    "baseSha256": "dfd6335fc2c8378a5fb948782ab2ceda7851f5e4485c72abd00060558efd31c9",
+    "classes": {
+      "arrowColor": "com.duolingo.chess.model.rive.ArrowColor",
+      "arrowType": "com.duolingo.chess.model.rive.ArrowType",
+      "boardController": "mz6",
+      "botSession": "com.duolingo.feature.chess.match.j",
+      "chessFen": "dm5",
+      "chessGameState": "ox5",
+      "chessSession": "r37",
+      "miniGame": "k25",
+      "miniSession": "le6",
+      "move": "gf6",
+      "pvpSession": "tr6",
+      "setupModel": "nx5",
+      "square": "h55"
+    },
+    "methods": {
+      "botExit": "Lcom/duolingo/feature/chess/match/j;->N(Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;)V",
+      "botGameEnd": "Lcom/duolingo/feature/chess/match/j;->I(Lcom/duolingo/feature/chess/match/j;Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;Ljava/lang/Integer;ZLcom/duolingo/data/chess/match/network/ChessMatchEndCondition;Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;Lnq8;I)Ljava/lang/Object;",
+      "clearArrows": "Lmz6;->c0()V",
+      "drawArrow": "Lmz6;->e0(Lh55;Lh55;ZLcom/duolingo/chess/model/rive/ArrowType;ILcom/duolingo/chess/model/rive/ArrowColor;)V",
+      "fullFen": "Ldm5;->b()Ljava/lang/String;",
+      "liveState": "Lmz6;->J()Lox5;",
+      "miniGameEnd": "Lk25;->m(Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;Lcom/duolingo/data/chess/match/network/ChessMatchEndCondition;)V",
+      "miniGameStart": "Lk25;->j(Lbd6;)V",
+      "miniSessionEnd": "Lle6;->F()V",
+      "moveUci": "Lgf6;->b()Ljava/lang/String;",
+      "pvpGameEnd": "Ltr6;->G(Lar6;Lpq8;)Ljava/lang/Object;",
+      "sessionCleared": "Lr37;->onCleared()V",
+      "sessionController": "Lr37;->l()Lmz6;",
+      "setupBoard": "Lmz6;->O(Lnx5;)V"
+    }
+  }
+}

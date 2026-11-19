@@ -95,6 +95,7 @@ object EngineLoop {
         private set
     @Volatile var lastPositionFen: String? = null
         private set
+    @Volatile private var hookAdapterStatus: String? = null
 
     /**
      * Loop heartbeat (updated every iteration + after every analysis). If the worker
@@ -615,7 +616,8 @@ object EngineLoop {
             val end = position.end?.let { priorEnd?.followedBy(it) ?: it } ?: priorEnd
             val fen = position.fen ?: previous.fen.takeUnless { newGame }
             pending = position.copy(fen = fen, end = end)
-            lastPositionAt = System.currentTimeMillis()
+            if (position.fen != null) lastPositionAt = System.currentTimeMillis()
+            else if (newGame) lastPositionAt = 0
             lastPositionFen = fen
             lastUserColor = position.user?.lowercase()
             lastTurnColor = fen?.split(' ')?.getOrNull(1)?.lowercase()?.takeIf { it == "w" || it == "b" }
@@ -734,6 +736,20 @@ object EngineLoop {
     fun onBridgeError(msg: String) {
         lastError = msg
         note(msg)
+    }
+
+    fun onHookAdapterStatus(status: String) {
+        if (status.isBlank() || hookAdapterStatus == status) return
+        hookAdapterStatus = status
+        note(status)
+    }
+
+    private fun hookConnectionLine(): String {
+        if (BridgeServer.hookConnected()) {
+            return listOfNotNull("已连接（socket 在线）", hookAdapterStatus).joinToString("\n")
+        }
+        return if (lastPositionAt > 0) "上次收到局面：${ago(lastPositionAt)}"
+        else "未连接（LSPosed 模块未上报局面）"
     }
 
     /**
@@ -945,11 +961,7 @@ object EngineLoop {
     fun snapshot(): StatusSnapshot {
         val c = client
         val end = pending.end
-        val hookState = when {
-            BridgeServer.hookConnected() -> "已连接（socket 在线）"
-            lastPositionAt > 0 -> "已连接（${ago(lastPositionAt)}收到局面）"
-            else -> "未连接（LSPosed 模块未上报局面）"
-        }
+        val hookState = hookConnectionLine()
         val engineLabel = when (engineState) {
             STATE_RUNNING -> "运行中"
             STATE_STARTING -> "启动中…"
@@ -1019,11 +1031,7 @@ object EngineLoop {
 
     fun statusText(): String {
         val c = client
-        val hookState = when {
-            BridgeServer.hookConnected() -> "已连接（socket 在线）"
-            lastPositionAt > 0 -> "已连接（${ago(lastPositionAt)}收到局面）"
-            else -> "未连接（LSPosed 模块未上报局面）"
-        }
+        val hookState = hookConnectionLine()
         val engineLabel = when (engineState) {
             STATE_RUNNING -> "运行中"
             STATE_STARTING -> "启动中…"

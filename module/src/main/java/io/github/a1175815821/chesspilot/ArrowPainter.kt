@@ -318,17 +318,14 @@ class ArrowPainter(private val remap: Remap) {
     @Volatile private var clearMethodFor: Class<*>? = null
 
     private fun clearNow(controller: Any) {
-        var m = clearMethod
-        if (m == null || clearMethodFor !== controller.javaClass) {
-            val names = remap.methodNames("clearArrows")
-            m = controller.javaClass.declaredMethods.firstOrNull {
-                it.name in names && it.parameterCount == 0 && it.returnType == Void.TYPE
-            }?.apply { isAccessible = true }
-            clearMethod = m
-            clearMethodFor = controller.javaClass
-        }
-        if (m == null) return
         try {
+            var m = clearMethod
+            if (m == null || clearMethodFor !== controller.javaClass) {
+                val loader = controller.javaClass.classLoader ?: return
+                m = remap.method(loader, "clearArrows")
+                clearMethod = m
+                clearMethodFor = controller.javaClass
+            }
             m.invoke(controller)
         } catch (t: Throwable) {
             MainHook.log("clear failed: $t")
@@ -340,19 +337,7 @@ class ArrowPainter(private val remap: Remap) {
     private fun resolveDrawMethod(controller: Any): java.lang.reflect.Method? {
         sMethod?.let { return it }
         val loader = controller.javaClass.classLoader ?: return null
-        val typeClz = remap.resolveClass(loader, "arrowType") ?: return null
-        val colorClz = remap.resolveClass(loader, "arrowColor") ?: return null
-        val sqClz = remap.resolveClass(loader, "square") ?: return null
-        val m = controller.javaClass.declaredMethods.firstOrNull {
-            it.parameterTypes.size == 6 &&
-                it.parameterTypes[0] == sqClz &&
-                it.parameterTypes[1] == sqClz &&
-                it.parameterTypes[2] == Boolean::class.javaPrimitiveType &&
-                it.parameterTypes[3] == typeClz &&
-                it.parameterTypes[4] == Integer.TYPE &&
-                it.parameterTypes[5] == colorClz
-        } ?: return null
-        m.isAccessible = true
+        val m = remap.method(loader, "drawArrow")
         sMethod = m
         return m
     }

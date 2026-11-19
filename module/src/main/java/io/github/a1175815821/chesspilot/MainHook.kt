@@ -9,6 +9,7 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
 import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
+import java.lang.reflect.Method
 import java.util.HashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,57 +58,61 @@ class MainHook : XposedModule() {
         if (!initialized.compareAndSet(false, true)) return
         BridgeAccess.context = context.applicationContext ?: context
         targetLoader = loader
-        val table = Remap.fromBaked().also { remap = it }
-        val stateBridge = StateBridge().also { bridge = it }
-        val arrowPainter = ArrowPainter(table).also { painter = it }
-        log("remap table v${RemapTable.APP_VERSION}")
-        hookModels(loader, table, stateBridge, arrowPainter)
-        hookController(loader, table, stateBridge, arrowPainter)
-        MatchEndHooks(table, loader, stateBridge).install()
-        hookRiveViews(loader)
-        HookRuntime.after(Activity::class.java.getDeclaredMethod("onPause"), "pause") { _, _ ->
-            OverlayFallback.remove()
+        BridgeClient.ensureStarted()
+        val version = try {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(TARGET, 0).versionName ?: "版本未知"
+        } catch (_: Exception) { "版本未知" }
+        BridgeClient.sendAdapterStatus("多邻国 $version · 正在识别棋盘接口")
+        try {
+            val table = Remap.forApk(context.applicationInfo.sourceDir, moduleApplicationInfo.nativeLibraryDir)
+            table.verify(loader)
+            val stateBridge = StateBridge(table.methodName("fullFen"), table.methodName("moveUci"))
+            val arrowPainter = ArrowPainter(table)
+            hookModels(loader, table, stateBridge, arrowPainter)
+            hookController(loader, table, stateBridge, arrowPainter)
+            MatchEndHooks(table, loader, stateBridge).install()
+            hookRiveViews(loader)
+            HookRuntime.after(Activity::class.java.getDeclaredMethod("onPause"), "pause") { _, _ ->
+                OverlayFallback.remove()
+            }
+            ViewModelFallback.hook(loader, stateBridge)
+            CommandLoop.configure(table, stateBridge, arrowPainter)
+            remap = table
+            bridge = stateBridge
+            painter = arrowPainter
+            val controller = table.resolveClass(loader, "boardController")?.name
+            log("mapped Duolingo $version: controller=$controller setup=${table.methodName("setupBoard")}")
+            BridgeClient.sendAdapterStatus("多邻国 $version · 棋盘接口已匹配")
+        } catch (t: Throwable) {
+            log("Duolingo $version adaptation failed: $t")
+            val reason = t.message?.take(140) ?: t.javaClass.simpleName
+            BridgeClient.sendAdapterStatus("多邻国 $version · 适配失败（$reason）")
         }
-        ViewModelFallback.hook(loader, stateBridge)
-        CommandLoop.configure(table, stateBridge, arrowPainter)
     }
 
     private fun hookModels(loader: ClassLoader, table: Remap, stateBridge: StateBridge, arrows: ArrowPainter) {
         for (key in listOf("chessGameState", "chessFen")) {
-            val type = table.resolveClass(loader, key)
-            if (type == null) { log("!! $key not found — check remap.json"); continue }
+            val type = requireNotNull(table.resolveClass(loader, key)) { "$key unavailable" }
             for (constructor in type.declaredConstructors) {
-                try {
-                    HookRuntime.after(constructor, key) { chain, _ ->
-                        val state = chain.thisObject
-                        if (state != null) {
-                            if (key == "chessGameState") {
-                                stateBridge.onGameState(state)
-                                arrows.onGameState(state)
-                            } else stateBridge.onFen(state)
-                        }
-                    }
-                } catch (e: Exception) { log("hook $key constructor failed: $e") }
+                HookRuntime.after(constructor, key) { chain, _ ->
+                    val state = chain.thisObject ?: return@after
+                    if (key == "chessGameState") {
+                        stateBridge.onGameState(state)
+                        arrows.onGameState(state)
+                    } else stateBridge.onFen(state)
+                }
             }
             log("hooked $key = ${type.name}")
         }
     }
 
     private fun hookController(loader: ClassLoader, table: Remap, stateBridge: StateBridge, arrows: ArrowPainter) {
-        val type = table.resolveClass(loader, "boardController")
-        if (type == null) { log("!! BoardController not found"); return }
-        val stateType = table.resolveClass(loader, "chessGameState")
-        val liveGetter = table.methodNames("liveState").single()
-        for (method in type.declaredMethods) {
-            if (method.name == liveGetter && method.returnType == stateType && method.parameterCount == 0) {
-                try {
-                    HookRuntime.after(method, "render") { chain, result ->
-                        val owner = chain.thisObject
-                        if (owner != null && result != null && stateBridge.onRenderedState(owner, result)) {
-                            arrows.onRenderedState(result)
-                        }
-                    }
-                } catch (e: Exception) { log("hook controller getter failed: $e") }
+        val liveGetter = table.method(loader, "liveState")
+        HookRuntime.after(liveGetter, "render") { chain, result ->
+            val owner = chain.thisObject
+            if (owner != null && result != null && stateBridge.onRenderedState(owner, result)) {
+                arrows.onRenderedState(result)
             }
         }
         fun setupBoard(controller: Any, model: Any? = null, miniMatchId: String? = null) {
@@ -116,27 +121,20 @@ class MainHook : XposedModule() {
                 RiveViewFinder.onControllerCreated(controller)
             }
         }
-        try {
-            val setupName = table.methodNames("setupBoard").single()
-            val setup = table.resolveClass(loader, "setupModel") ?: return
-            HookRuntime.after(type.getDeclaredMethod(setupName, setup), "board-setup") { chain, _ ->
-                chain.thisObject?.let { setupBoard(it, model = chain.getArg(0)) }
-            }
-            val miniGame = table.resolveClass(loader, "miniGame") ?: return
-            val miniStart = table.methodNames("miniGameStart").single()
-            HookRuntime.after(miniGame.declaredMethods.single { it.name == miniStart && it.parameterCount == 1 },
-                "mini-game-start") { chain, _ ->
-                val game = chain.thisObject ?: return@after
-                val params = Reflect.getObjectField(game, "g") ?: return@after
-                val id = Reflect.getObjectField(params, "a") as? String ?: return@after
-                val controller = Reflect.getObjectField(game, "a") ?: return@after
-                setupBoard(controller, miniMatchId = id)
-            }
-        } catch (e: Exception) { log("hook board setup failed: $e") }
+        HookRuntime.after(table.method(loader, "setupBoard"), "board-setup") { chain, _ ->
+            chain.thisObject?.let { setupBoard(it, model = chain.getArg(0)) }
+        }
+        HookRuntime.after(table.method(loader, "miniGameStart"), "mini-game-start") { chain, _ ->
+            val game = chain.thisObject ?: return@after
+            val params = Reflect.getObjectField(game, "g") ?: return@after
+            val id = Reflect.getObjectField(params, "a") as? String ?: return@after
+            val controller = Reflect.getObjectField(game, "a") ?: return@after
+            setupBoard(controller, miniMatchId = id)
+        }
     }
 
-    private fun readLiveState(controller: Any, getter: String): Any? = try {
-        Reflect.callMethod(controller, getter)
+    private fun readLiveState(controller: Any, getter: Method): Any? = try {
+        getter.invoke(controller)
     } catch (t: Throwable) {
         log("live board read failed: $t")
         null
@@ -202,7 +200,7 @@ class MainHook : XposedModule() {
                 }
                 (saved?.get("view") as? View)?.let { RiveViewFinder.noteCtorInstance("hot-reload", it) }
                 if (validController != null) {
-                    val getter = remap?.methodNames("liveState")?.singleOrNull()
+                    val getter = remap?.method(loader, "liveState")
                     val state = getter?.let { readLiveState(validController, it) } ?: saved?.get("state")
                     if (state != null && remap?.resolveClass(loader, "chessGameState")?.isInstance(state) == true) {
                         bridge?.onRenderedState(validController, state)

@@ -11,7 +11,10 @@ import java.util.WeakHashMap
  * docs/REVERSE_ENGINEERING.md. Every accessor validates defensively — if Duolingo changes
  * a layout, we degrade to the FEN-only secondary hook instead of crashing the host app.
  */
-class StateBridge {
+class StateBridge(
+    private val fenGetter: String = "b",
+    private val moveGetter: String = "b",
+) {
 
     private data class Board(val id: String = UUID.randomUUID().toString(), val fen: String? = null, val end: GameEnd? = null)
     private data class ConstructedState(val setup: Any, val state: Any)
@@ -185,9 +188,9 @@ class StateBridge {
     }
 
     private fun extractFenFrom(fenObj: Any): String? {
-        // Preferred: the app's own full-FEN getter qh4.b().
+        // Preferred: the app's own full-FEN getter.
         try {
-            val full = Reflect.callMethod(fenObj, "b") as? String
+            val full = Reflect.callMethod(fenObj, fenGetter) as? String
             if (full != null && full.count { it == ' ' } >= 5) return full
         } catch (_: Throwable) { }
         val placement = Reflect.getObjectField(fenObj, "a") as? String ?: return null
@@ -276,7 +279,7 @@ class StateBridge {
         (Reflect.callMethod(colorObj, "getSymbol") as? String)?.lowercase()
     } catch (_: Throwable) { null }
 
-    /** ChessGameState.f = List<Move>; each Move.b() = uci "e2e4". */
+    /** ChessGameState.f contains the moves in play order. */
     private fun extractMoves(state: Any): List<String> {
         return try {
             val list = Reflect.getObjectField(state, "f") as? List<*> ?: return emptyList()
@@ -286,7 +289,7 @@ class StateBridge {
 
     private fun moveUcis(moves: List<*>): List<String> = moves.mapNotNull { move ->
         if (move == null) return@mapNotNull null
-        try { Reflect.callMethod(move, "b") as? String } catch (_: Throwable) { null }
+        try { Reflect.callMethod(move, moveGetter) as? String } catch (_: Throwable) { null }
     }
 
     private fun bool(obj: Any, field: String): Boolean = try {

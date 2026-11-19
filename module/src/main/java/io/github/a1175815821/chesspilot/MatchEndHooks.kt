@@ -6,21 +6,21 @@ import io.github.libxposed.api.XposedInterface
 internal class MatchEndHooks(
     private val table: Remap, private val loader: ClassLoader, private val bridge: StateBridge,
 ) {
-    private val controllerGetter = table.methodNames("sessionController").single()
+    private val controllerGetter = table.method(loader, "sessionController")
 
     fun install() {
-        before("botSession", "botGameEnd", 8) { chain ->
+        before("botGameEnd") { chain ->
             val mask = chain.getArg(7) as Int
             val serverReason = if (mask and 8 == 0) name(chain.getArg(4)) else null
             val clientReason = if (mask and 16 == 0) name(chain.getArg(5)) else null
-            val owner = chain.getArg(0)?.let { Reflect.callMethod(it, controllerGetter) }
+            val owner = chain.getArg(0)?.let { controllerGetter.invoke(it) }
             bridge.onGameEnd(owner, GameEnd(serverReason ?: clientReason ?: "COMPLETED", name(chain.getArg(1))))
         }
-        before("botSession", "botExit", 1) { chain ->
+        before("botExit") { chain ->
             val reason = name(chain.getArg(0)) ?: return@before
             bridge.onGameEnd(controllerOf(chain), GameEnd(reason))
         }
-        before("pvpSession", "pvpGameEnd", 2) { chain ->
+        before("pvpGameEnd") { chain ->
             val data = chain.getArg(0) ?: return@before
             val reason = name(Reflect.getObjectField(data, "b")) ?: "COMPLETED"
             val winner = name(Reflect.getObjectField(data, "a"))
@@ -32,33 +32,25 @@ internal class MatchEndHooks(
             }
             bridge.onGameEnd(controllerOf(chain), GameEnd(reason, outcome))
         }
-        before("miniGame", "miniGameEnd", 2) { chain ->
+        before("miniGameEnd") { chain ->
             val owner = chain.thisObject?.let { Reflect.getObjectField(it, "a") }
             bridge.onGameEnd(owner, GameEnd(name(chain.getArg(1)) ?: "COMPLETED", name(chain.getArg(0))))
         }
-        before("miniSession", "miniSessionEnd", 0) { chain ->
+        before("miniSessionEnd") { chain ->
             val clock = chain.thisObject?.let { Reflect.getObjectField(it, "z") }
             val reason = if (clock != null && Reflect.getIntField(clock, "j") <= 0) "TIMEOUT" else "COMPLETED"
             bridge.onGameEnd(controllerOf(chain), GameEnd(reason), onlyIfPlaying = true)
         }
-        before("chessSession", "sessionCleared", 0) { chain ->
+        before("sessionCleared") { chain ->
             bridge.onGameEnd(controllerOf(chain), GameEnd("LEFT_BOARD"))
         }
     }
 
-    private fun before(key: String, method: String, args: Int, callback: (XposedInterface.Chain) -> Unit) {
-        try {
-            val type = table.resolveClass(loader, key) ?: error("class $key unavailable")
-            val name = table.methodNames(method).single()
-            val executable = type.declaredMethods.single { it.name == name && it.parameterCount == args }
-            HookRuntime.before(executable, method, callback)
-        } catch (e: Exception) {
-            MainHook.log("match lifecycle hook $method unavailable: $e")
-        }
-    }
+    private fun before(method: String, callback: (XposedInterface.Chain) -> Unit) =
+        HookRuntime.before(table.method(loader, method), method, callback)
 
     private fun controllerOf(chain: XposedInterface.Chain): Any? =
-        chain.thisObject?.let { Reflect.callMethod(it, controllerGetter) }
+        chain.thisObject?.let { controllerGetter.invoke(it) }
 
     private fun name(value: Any?): String? = (value as? Enum<*>)?.name
 }
