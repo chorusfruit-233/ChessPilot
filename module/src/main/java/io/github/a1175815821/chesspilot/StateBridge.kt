@@ -291,7 +291,7 @@ class StateBridge(
     // ------------------------------------------------------------ extractors
 
     /** ChessGameState.a (fen: ChessFen) → full FEN string. Same extraction as [extractFenFrom]. */
-    private fun extractFen(state: Any): String? {
+    internal fun extractFen(state: Any): String? {
         val fenObj = Reflect.getObjectField(state, "a") ?: return null
         return extractFenFrom(fenObj)
     }

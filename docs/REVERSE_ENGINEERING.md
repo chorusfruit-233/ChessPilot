@@ -16,6 +16,7 @@ the hooks. The control screen reports the installed version and any failure.
 | PvP result | `tr6.G(ar6, pq8)` | `o67.G(t57, l89)` |
 | Assigned color | Bot `j.e0`, PvP `tr6.L` | Bot `j.d0`, PvP `o67.L` |
 | Mini match start and result | `k25.j(bd6)` and `k25.m(…)` | `bd5.j(zq6)` and `bd5.m(…)` |
+| Promotion preview, choice and reset | `mz6.P(gf6, boolean)`, `mz6.N(Integer, Integer, Integer)`, `mz6.d0()` | `qe7.Q(kt6, boolean)`, `qe7.N(Integer, Integer, Integer)`, `qe7.g0()` |
 
 The bundled profiles in `module/src/main/assets/dex-profiles.json` were obtained
 by running the Kotlin resolver through DexKit's desktop JNI library on the
@@ -26,6 +27,14 @@ name, uncompressed size and CRC32 for each entry.
 The session controller getter associates the assigned color with its live board.
 The bridge sends that assignment to the engine for turn checks. Rive uses the
 live chess state's view orientation to convert squares to touch coordinates.
+
+The promotion profile is optional. DexKit identifies the choice callback via
+`ChessPieceType.getRiveValue()` and `ChessHaptic.PROMOTED_PAWN`, the preview via
+the destination handler, and the reset via the native `PROMOTION_EVENT` handler.
+The choice callback reads the selected pawn's legal moves in `ox5.h` / `da6.h`.
+It takes the one-based Rive row, column and piece value. ChessPilot checks the live
+FEN and the matching preview before submitting the UCI suffix's piece and running
+the native reset. The move history retains the full promotion suffix.
 
 ## Earlier reference APK: 6.105.2 / versionCode 2497
 
@@ -356,10 +365,8 @@ vto   = zi3.P("e4")
 promo = ChessPieceType.Companion.a("q")   # promotion char → type
 cl5.s(from, to, /*animate=*/false, ArrowType.SOLID, /*mode=*/0, ArrowColor.YELLOW)
 ```
-This is byte-for-byte the call convention `ArrowPainter` uses — verified from real
-caller bytecode, not guessed. Promotion piece type is carried in the UCI string; the interactive lesson picker
-is a separate Rive-drawn UI flow the assistant deliberately does not drive
-(promotions are manual-only by design).
+The call convention matches `ArrowPainter`. The UCI string carries the promotion
+piece type. Interactive promotion uses the native board callbacks described above.
 
 ## 4. Hook-point strategy (in order of preference)
 

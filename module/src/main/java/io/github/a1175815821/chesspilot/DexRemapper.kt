@@ -55,8 +55,44 @@ internal class DexRemapper(private val dex: DexKitBridge) {
             method.matches("void") && method.usingFields.any { it.field.typeName == reset.name }
         })
         discoverResults(controller.name, fen.name, opening.descriptor)
-        return JSONObject().put("classes", JSONObject(classes)).put("methods", JSONObject(methods))
+        val mapping = JSONObject().put("classes", JSONObject(classes)).put("methods", JSONObject(methods))
             .put("fields", JSONObject(fields))
+        discoverPromotion(controller, state, move)?.let { mapping.put("promotion", it) }
+        return mapping
+    }
+
+    /** An unmatched picker leaves the rest of the board adapter available. */
+    private fun discoverPromotion(controller: ClassData, state: ClassData, move: ClassData): JSONObject? {
+        val choose = controller.methods.singleOrNull { method ->
+            method.matches("void", INTEGER, INTEGER, INTEGER) &&
+                method.invokes.any { it.className == PIECE_TYPE && it.name == "getRiveValue" } &&
+                method.usingFields.any { it.field.className == MODEL + "ChessHaptic" && it.field.name == "PROMOTED_PAWN" }
+        } ?: return null
+        val moves = choose.usingFields.map { it.field }
+            .filter { it.className == state.name && it.typeName == LIST }.distinctBy { it.descriptor }
+            .singleOrNull() ?: return null
+        val destination = controller.methods.singleOrNull { method ->
+            method.matches("void", INTEGER, INTEGER) && method.usingFields.any { it.field.descriptor == moves.descriptor }
+        } ?: return null
+        val preview = destination.invokes.singleOrNull {
+            it.className == controller.name && it.matches("void", move.name, "boolean")
+        } ?: return null
+        val event = controller.methods.singleOrNull { method ->
+            method.usingFields.any { it.field.className == MODEL + "rive.ChessRiveEvent" && it.field.name == "PROMOTION_EVENT" } &&
+                method.invokes.any { it.descriptor == choose.descriptor }
+        } ?: return null
+        val reset = event.invokes.singleOrNull { method ->
+            method.className == controller.name && method.matches("void") && method.usingFields.any { use ->
+                use.field.type?.methods?.any { it.name == "toString" && "ResetInputs" in it.usingStrings } == true
+            }
+        } ?: return null
+        val parse = state.methods.singleOrNull { it.matches(move.name, STRING) } ?: return null
+        return JSONObject()
+            .put("preview", preview.descriptor)
+            .put("choose", choose.descriptor)
+            .put("reset", reset.descriptor)
+            .put("parseMove", parse.descriptor)
+            .put("selectedMoves", moves.descriptor)
     }
 
     private fun discoverResults(controller: String, fen: String, setup: String) {
@@ -156,9 +192,11 @@ internal class DexRemapper(private val dex: DexKitBridge) {
 
     companion object {
         private const val STRING = "java.lang.String"
+        private const val INTEGER = "java.lang.Integer"
         private const val OBJECT = "java.lang.Object"
         private const val LIST = "java.util.List"
         private const val MODEL = "com.duolingo.chess.model."
+        internal const val PIECE_TYPE = MODEL + "ChessPieceType"
         private const val COLOR = MODEL + "ChessPlayerColor"
         private const val ARROW_TYPE = MODEL + "rive.ArrowType"
         private const val ARROW_COLOR = MODEL + "rive.ArrowColor"

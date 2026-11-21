@@ -77,7 +77,7 @@ class MainHook : XposedModule() {
                 OverlayFallback.remove()
             }
             ViewModelFallback.hook(loader, stateBridge)
-            CommandLoop.configure(table, stateBridge, arrowPainter)
+            CommandLoop.configure(table, loader, stateBridge, arrowPainter)
             remap = table
             bridge = stateBridge
             painter = arrowPainter

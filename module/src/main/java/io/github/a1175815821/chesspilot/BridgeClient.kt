@@ -134,7 +134,7 @@ object BridgeClient {
 
     /**
      * Ask the companion to guide the user manually (banner + event). Codes:
-     * "promotion" (picker geometry missed — ask user to pick the queen),
+     * "promotion" (ask the user to promote to the piece in the UCI suffix),
      * "stuck" (taps didn't land — ask user to play the move).
      */
     fun sendHelp(code: String, uci: String) {
