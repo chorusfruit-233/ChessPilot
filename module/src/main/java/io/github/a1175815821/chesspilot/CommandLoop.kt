@@ -35,9 +35,9 @@ object CommandLoop {
      * The painter/player are the SINGLE shared instances (the old lazy second painter
      * re-resolved sMethod and re-probed enum colors on its own). */
     @Synchronized
-    fun configure(remap: Remap, bridge: StateBridge, painter: ArrowPainter) {
+    fun configure(remap: Remap, loader: ClassLoader, bridge: StateBridge, painter: ArrowPainter) {
         painterInst = painter
-        playerInst = AutoPlayer(bridge)
+        playerInst = AutoPlayer(bridge, remap, loader)
         bridgeInst = bridge
         if (started) return
         started = true

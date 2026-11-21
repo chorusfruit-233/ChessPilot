@@ -2,6 +2,7 @@ package io.github.a1175815821.chesspilot
 
 import android.view.MotionEvent
 import android.view.View
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Optional auto-play: executes Stockfish's move on the real board by dispatching
@@ -16,15 +17,44 @@ import android.view.View
  *       white: x = left + file*cell,            y = top + (7-(rank-1))*cell
  *       black: x = left + (7-file)*cell,        y = top + (rank-1)*cell
  *
- * Promotion is manual-only, deliberately: the picker is Rive-drawn (no Views,
- * no window, no semantics to drive) and every coordinate scheme proved fragile
- * across files and resolutions. A promotion UCI (5 chars) never taps — it goes
- * straight to [requestManualPromotion], which reports to the companion; the
- * floating overlay then shows the plea directly as its title.
+ * For a promotion, wait for the native board to accept the destination, then
+ * submit the requested piece through the picker callback.
  */
-class AutoPlayer(private val bridge: StateBridge) {
+class AutoPlayer internal constructor(
+    private val bridge: StateBridge, remap: Remap, loader: ClassLoader,
+) {
 
     private val mainHandler = GenerationHandler(android.os.Looper.getMainLooper())
+
+    private data class PromotionAttempt(
+        val key: String, val gameId: String?, val fen: String, val uci: String,
+        val flipped: Boolean, val controller: Any, val view: View,
+    )
+
+    private val pendingPromotion = AtomicReference<PromotionAttempt?>()
+    private val promotion = try {
+        remap.promotionPicker(loader)?.also { picker ->
+            HookRuntime.before(picker.choose, "promotion-choice") { chain ->
+                val pending = pendingPromotion.get()
+                if (pending != null && chain.thisObject === pending.controller) {
+                    pendingPromotion.compareAndSet(pending, null)
+                }
+            }
+            HookRuntime.after(picker.preview, "promotion-preview") { chain, _ ->
+                val pending = pendingPromotion.get() ?: return@after
+                val move = chain.getArg(0) ?: return@after
+                if (chain.thisObject === pending.controller && chain.getArg(1) == true &&
+                    picker.matchesPreview(move, pending.uci)
+                ) {
+                    // Run after the native tap handler has finished showing the picker.
+                    mainHandler.post { HookRuntime.runIfActive { selectPromotion(picker, pending) } }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        MainHook.log("native promotion unavailable: $e")
+        null
+    }
 
     fun close() {
         mainHandler.close()
@@ -35,6 +65,7 @@ class AutoPlayer(private val bridge: StateBridge) {
         activeKey = null
         inFlightKey = null
         attemptKey = null
+        pendingPromotion.set(null)
         attempts.set(0)
         mainHandler.cancelPending()
     }
@@ -85,28 +116,27 @@ class AutoPlayer(private val bridge: StateBridge) {
             MainHook.log("autoplay skipped: position is no longer playable ($uci)")
             return
         }
-        if (uci.length < 4) return
-        // Shape gate: only real UCI (e2e4 / e7e8q) proceeds. Engine-sent markers
-        // like "(none)" (terminal position, length 6) used to fall into the
-        // promotion branch below and fire a nonsense manual-promotion plea.
         if (!isLegalUci(uci)) {
             MainHook.log("autoplay refused: not a UCI move: $uci")
             return
         }
-        // Promotion (5-char UCI): manual-only, no taps, no picker driving.
-        if (uci.length >= 5) {
-            requestManualPromotion(uci)
+        val promotes = uci.length == 5
+        if (promotes && promotion == null) {
+            BridgeClient.sendHelp("promotion", uci)
             return
         }
         val flipped = orientation == "b"
         val gap = (gapMs ?: DEFAULT_GAP_MS).coerceIn(150L, 1500L)
         // Per-position attempt budget (resets on a new fen/move pair).
         val key = "$gameId|$cmdFen|$uci"
-        if (attemptKey != key) {
-            attemptKey = key
+        // Never repeat pawn taps into a picker waiting for a choice.
+        val budgetKey = if (promotes) "$gameId|$cmdFen|promotion" else key
+        if (attemptKey != budgetKey) {
+            attemptKey = budgetKey
             attempts.set(0)
         }
-        if (attempts.get() >= MAX_ATTEMPTS) {
+        val maxAttempts = if (promotes) 1 else MAX_ATTEMPTS
+        if (attempts.get() >= maxAttempts) {
             MainHook.log("autoplay: attempt budget spent for $uci, staying quiet")
             return
         }
@@ -117,6 +147,7 @@ class AutoPlayer(private val bridge: StateBridge) {
             MainHook.log("autoplay: chain already in flight for $uci, ignoring duplicate tap")
             return
         }
+        pendingPromotion.set(null)
         inFlightKey = key
         activeKey = key
 
@@ -138,6 +169,11 @@ class AutoPlayer(private val bridge: StateBridge) {
                 return@post
             }
             try {
+                if (promotes && !canPreparePromotion(uci, cmdFen)) {
+                    finishFlight(key)
+                    if (!isSuperseded(key, gameId, cmdFen, uci, flipped)) BridgeClient.sendHelp("promotion", uci)
+                    return@post
+                }
                 tapMove(view, uci, flipped, gap, gameId, cmdFen, key)
             } catch (t: Throwable) {
                 finishFlight(key)
@@ -169,6 +205,13 @@ class AutoPlayer(private val bridge: StateBridge) {
                     finishFlight(key)
                     return@postDelayed
                 }
+                if (uci.length == 5) {
+                    val controller = BridgeAccess.boardController ?: run {
+                        finishFlight(key)
+                        return@postDelayed
+                    }
+                    pendingPromotion.set(PromotionAttempt(key, gameId, cmdFen, uci, flipped, controller, view))
+                }
                 tapSquare(view, to, flipped)
                 if (!isSuperseded(key, gameId, cmdFen, uci, flipped)) {
                     scheduleAppliedCheck(view, uci, flipped, gap, gameId, cmdFen, key)
@@ -195,30 +238,58 @@ class AutoPlayer(private val bridge: StateBridge) {
 
     @Synchronized private fun finishFlight(key: String) {
         if (inFlightKey == key) inFlightKey = null
+        pendingPromotion.get()?.takeIf { it.key == key }?.let { pendingPromotion.compareAndSet(it, null) }
     }
 
-    /**
-     * Did our move land on the board? Retry while the board is unchanged (bounded);
-     * give up to explicit manual guidance instead of dying silent (which used to
-     * deadlock the whole game: same position, no retrigger, no next move ever).
-     */
-    /**
-     * Promotion is manual-only: report to the companion (which shows the plea
-     * directly on the floating overlay), tap nothing. Deliberately stable —
-     * no picker driving of any kind.
-     */
-    private fun requestManualPromotion(uci: String) {
-        MainHook.log("autoplay: promotion $uci — manual pick requested, no taps")
-        BridgeClient.sendHelp("promotion", uci)
+    private fun canPreparePromotion(uci: String, fen: String): Boolean {
+        val picker = promotion ?: return false
+        val controller = BridgeAccess.boardController ?: return false
+        val state = picker.readState(controller) ?: return false
+        return bridge.extractFen(state) == fen && picker.canPrepare(state, uci)
     }
 
+    private fun selectPromotion(picker: PromotionPicker, pending: PromotionAttempt) {
+        if (pendingPromotion.get() !== pending) return
+        try {
+            bridge.onPlayableBoard(pending.gameId, pending.fen) {
+                if (BridgeAccess.boardController !== pending.controller ||
+                    !pending.view.isShown || !pending.view.isAttachedToWindow
+                ) return@onPlayableBoard
+                val state = picker.readState(pending.controller) ?: return@onPlayableBoard
+                if (bridge.extractFen(state) != pending.fen || !picker.canChoose(state, pending.uci) ||
+                    isSuperseded(pending.key, pending.gameId, pending.fen, pending.uci, pending.flipped)
+                ) return@onPlayableBoard
+                if (pendingPromotion.compareAndSet(pending, null)) {
+                    picker.select(pending.controller, pending.uci, pending.flipped)
+                    MainHook.log("autoplay: submitted native promotion ${pending.uci}")
+                }
+            }
+        } catch (e: Exception) {
+            MainHook.log("autoplay: native promotion failed: $e")
+        }
+    }
+
+    /** Verify the move and retry only ordinary board taps on an unchanged position. */
     private fun scheduleAppliedCheck(
         view: View, uci: String, flipped: Boolean, gap: Long,
         gameId: String?, cmdFen: String, key: String,
     ) {
         mainHandler.postDelayed({
             try {
+                val promotes = uci.length == 5
+                if (promotes && bridge.gameId == gameId && bridge.lastFen != cmdFen &&
+                    uci in bridge.lastMoves.takeLast(3)
+                ) {
+                    MainHook.log("autoplay applied: $uci")
+                    finishFlight(key)
+                    return@postDelayed
+                }
                 if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return@postDelayed
+                if (promotes) {
+                    finishFlight(key)
+                    BridgeClient.sendHelp("promotion", uci)
+                    return@postDelayed
+                }
                 val uci4 = uci.take(4)
                 val applied = bridge.lastMoves.takeLast(3).any { it.take(4) == uci4 }
                 if (applied) {

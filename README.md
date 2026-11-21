@@ -41,7 +41,7 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 手机需要 root 和支持 **libxposed API 102** 的框架。当前适配多邻国 `6.105.2` 和 `6.106.3`（arm64），均已核对真实 APK 接口。新版的真机联动待验证。
 
-1. 安装 **ChessPilot 0.6.4 合包 APK**。包名为 `com.chessassist`，包含模块、引擎和控制页。
+1. 安装最新版 **ChessPilot 合包 APK**。包名为 `com.chessassist`，包含模块、引擎和控制页。
 2. 从旧版迁移时，在框架管理器中停用原来的独立模块，再启用新的 **ChessPilot**，作用域只选**多邻国**，将多邻国结束运行后重开一次。
 3. 打开 ChessPilot，点「启动引擎服务」（允许通知）→ 进多邻国开一局。状态页可查看模块连接和实际 CPU 路径。
 
@@ -54,6 +54,8 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 `0.6.3` 保留开局初始化时取得的棋盘状态，修复 Hook 已连接、控制页却一直显示「等待对局」的问题。
 
 `0.6.4` 适配多邻国 6.106.3，并在启动时按实际 APK 选择棋盘、招法和结算接口。更新 APK 后，DexKit 可以重新定位仍符合已验证结构的接口。控制页的「Hook 连接」会显示实际版本和匹配结果。
+
+`0.6.6` 支持自动升变。棋盘确认兵的落点后，按引擎招法选择后、车、象或马。
 
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 

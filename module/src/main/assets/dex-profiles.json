@@ -37,6 +37,13 @@
       "sessionCleared": "Lfj7;->onCleared()V",
       "sessionController": "Lfj7;->l()Lqe7;",
       "setupBoard": "Lqe7;->P(Lca6;)V"
+    },
+    "promotion": {
+      "choose": "Lqe7;->N(Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)V",
+      "parseMove": "Lda6;->m(Ljava/lang/String;)Lkt6;",
+      "preview": "Lqe7;->Q(Lkt6;Z)V",
+      "reset": "Lqe7;->g0()V",
+      "selectedMoves": "Lda6;->h:Ljava/util/List;"
     }
   },
   "684f64a1a2ee541e40fb9dc0e663fff99a34c9b7ed1f281f69fb24720d13dcef": {
@@ -77,6 +84,13 @@
       "sessionCleared": "Lr37;->onCleared()V",
       "sessionController": "Lr37;->l()Lmz6;",
       "setupBoard": "Lmz6;->O(Lnx5;)V"
+    },
+    "promotion": {
+      "choose": "Lmz6;->N(Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)V",
+      "parseMove": "Lox5;->i(Ljava/lang/String;)Lgf6;",
+      "preview": "Lmz6;->P(Lgf6;Z)V",
+      "reset": "Lmz6;->d0()V",
+      "selectedMoves": "Lox5;->h:Ljava/util/List;"
     }
   }
 }

@@ -388,7 +388,7 @@ object OverlayManager {
             // Don't wipe a fresher state that arrived out of order. "局面停滞" is
             // deliberately replaceable (B2): it is written by the idle annotator,
             // and any live skip means the game moved on. Manual pleas
-            // ("升变请手动选皇后" / "请手动走棋") need no protection: they only
+            // ("请手动升变" / "请手动走棋") need no protection: they only
             // fire on the user's turn with a static board, which neither this
             // clear (opponent's turn only) nor the stale annotator (silent on
             // the user's turn) can overwrite; fresh analysis replaces them.

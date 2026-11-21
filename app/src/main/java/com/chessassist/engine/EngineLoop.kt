@@ -769,8 +769,15 @@ object EngineLoop {
     fun onNeedHelp(code: String, uci: String) = synchronized(pendingLock) {
         if (pending.end != null || lastPushedMove != uci || lastPushedFen != pending.fen) return@synchronized
         if (code == "promotion") {
-            note("升变请手动选皇后：$uci")
-            OverlayManager.showStatus("升变请手动选皇后", uci)
+            val title = when (uci.lastOrNull()) {
+                'q' -> "请手动升变为后"
+                'r' -> "请手动升变为车"
+                'b' -> "请手动升变为象"
+                'n' -> "请手动升变为马"
+                else -> "请手动升变"
+            }
+            note("$title · $uci")
+            OverlayManager.showStatus(title, uci)
         } else {
             note("请手动走棋：$uci")
             OverlayManager.showStatus("请手动走棋", uci)
