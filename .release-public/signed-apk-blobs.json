@@ -1,0 +1,87 @@
+{
+  "name": "ChessPilot-0.6.5-arm64-v8a.apk",
+  "sha256": "b75257ec890afd9b0bcd06d80ccaac30913743e4809ede19a249daccef8fb31d",
+  "size": 81964883,
+  "chunks": [
+    {
+      "sha": "cfbf44006a3731a72cf4c6e1bc4da4de6fb1771b",
+      "size": 4194304
+    },
+    {
+      "sha": "5fc34a7b1b73a762b37a23fec1dc396e8cecc1d1",
+      "size": 4194304
+    },
+    {
+      "sha": "1968d5c863ce930c36e9bd1539adcafda3fe52dd",
+      "size": 4194304
+    },
+    {
+      "sha": "41c38263f3f6fb62ea762fff650c3ae0cc66d50b",
+      "size": 4194304
+    },
+    {
+      "sha": "3e3e21a3d7053079ff52a5f60a9ce8dc0dba3a3c",
+      "size": 4194304
+    },
+    {
+      "sha": "7f6fc93f3923306af4d4dc0745f9514a2de243b3",
+      "size": 4194304
+    },
+    {
+      "sha": "758867b303940d0ed51de7625396c54c5a721f10",
+      "size": 4194304
+    },
+    {
+      "sha": "c05bf846efdaa11347bc72fb54267a65c43533eb",
+      "size": 4194304
+    },
+    {
+      "sha": "ff9df7212ab746483b7a3caeca1dd672a3ecdd51",
+      "size": 4194304
+    },
+    {
+      "sha": "fb93c24ccce63c1154b58f53b66d68858aa00425",
+      "size": 4194304
+    },
+    {
+      "sha": "a72f2a9d30ee681c5ff616de60e3c8c6cebf790c",
+      "size": 4194304
+    },
+    {
+      "sha": "d96b688e16f63ce96031a4c378c4a1c4855a498d",
+      "size": 4194304
+    },
+    {
+      "sha": "f6ca674696eaa4192722c4938b61e8c2406c8741",
+      "size": 4194304
+    },
+    {
+      "sha": "6c6a9bd7d12447a5ecdf6b1c9ab9d16ae1bb93ee",
+      "size": 4194304
+    },
+    {
+      "sha": "380cbe77fd474258afc691dce2e5fc262706288b",
+      "size": 4194304
+    },
+    {
+      "sha": "961f3358fa347a016011430f30bc9142de62b5c3",
+      "size": 4194304
+    },
+    {
+      "sha": "7ae34053caa893f04ae8a6a63317531aa3788836",
+      "size": 4194304
+    },
+    {
+      "sha": "b647153b2dc8b33d8d68dbb1843a21fceb96369f",
+      "size": 4194304
+    },
+    {
+      "sha": "26f7b7c6431e46ea463fb124086902b4868efcec",
+      "size": 4194304
+    },
+    {
+      "sha": "16018abd579184e7a78daaac5b42a4800c282055",
+      "size": 2273107
+    }
+  ]
+}
