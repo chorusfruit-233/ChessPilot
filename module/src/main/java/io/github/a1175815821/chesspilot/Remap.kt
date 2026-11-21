@@ -3,8 +3,10 @@ package io.github.a1175815821.chesspilot
 import android.content.Context
 import org.json.JSONObject
 import org.luckypray.dexkit.DexKitBridge
+import org.luckypray.dexkit.wrap.DexField
 import org.luckypray.dexkit.wrap.DexMethod
 import java.io.File
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.security.MessageDigest
 import java.util.zip.ZipFile
@@ -13,6 +15,7 @@ import java.util.zip.ZipFile
 class Remap private constructor(map: JSONObject) {
     private val classes = map.getJSONObject("classes")
     private val methods = map.getJSONObject("methods")
+    private val fields = map.getJSONObject("fields")
     private val classCache = HashMap<String, Class<*>?>()
 
     fun resolveClass(loader: ClassLoader, key: String): Class<*>? = synchronized(classCache) {
@@ -31,9 +34,17 @@ class Remap private constructor(map: JSONObject) {
         return actual.apply { isAccessible = true }
     }
 
+    fun field(loader: ClassLoader, key: String): Field {
+        val expected = DexField(fields.getString(key))
+        val actual = expected.getFieldInstance(loader)
+        check(DexField(actual) == expected) { "$key type changed" }
+        return actual.apply { isAccessible = true }
+    }
+
     internal fun verify(loader: ClassLoader) {
         for (key in classes.keys()) resolveClass(loader, key)
         for (key in methods.keys()) method(loader, key)
+        for (key in fields.keys()) field(loader, key)
     }
 
     private fun descriptor(key: String) = DexMethod(methods.getString(key))
@@ -72,15 +83,15 @@ object BridgeAccess {
     fun clear() {
         context = null
         boardController = null
-        lastUserColor = null
+        boardColor = null
         lastState = null
         riveView = null
         riveCandidates = emptyList()
     }
     @Volatile var context: Context? = null
     @Volatile var boardController: Any? = null
-    /** Last known user color ("w"|"b") — mirrors StateBridge for flip-aware fallbacks. */
-    @Volatile var lastUserColor: String? = null
+    /** Native board orientation for converting squares to positions in the view. */
+    @Volatile var boardColor: String? = null
 
     /** Latest rendered ChessGameState instance (type `Object` — resolved dynamically). */
     @Volatile var lastState: Any? = null

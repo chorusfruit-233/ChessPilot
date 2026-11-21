@@ -108,6 +108,13 @@ class MainHook : XposedModule() {
     }
 
     private fun hookController(loader: ClassLoader, table: Remap, stateBridge: StateBridge, arrows: ArrowPainter) {
+        val colorFields = listOf(table.field(loader, "botPlayerColor"), table.field(loader, "pvpPlayerColor"))
+        HookRuntime.after(table.method(loader, "sessionController"), "session-player-color") { chain, owner ->
+            val session = chain.thisObject ?: return@after
+            if (owner == null) return@after
+            val field = colorFields.firstOrNull { it.declaringClass.isInstance(session) } ?: return@after
+            field.get(session)?.let { stateBridge.onPlayerColor(owner, it) }
+        }
         val liveGetter = table.method(loader, "liveState")
         HookRuntime.after(liveGetter, "render") { chain, result ->
             val owner = chain.thisObject

@@ -18,6 +18,10 @@
       "setupModel": "ca6",
       "square": "gg5"
     },
+    "fields": {
+      "botPlayerColor": "Lcom/duolingo/feature/chess/match/j;->d0:Lcom/duolingo/chess/model/ChessPlayerColor;",
+      "pvpPlayerColor": "Lo67;->L:Lcom/duolingo/data/chess/match/network/ChessMatchPlayerColor;"
+    },
     "methods": {
       "botExit": "Lcom/duolingo/feature/chess/match/j;->N(Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;)V",
       "botGameEnd": "Lcom/duolingo/feature/chess/match/j;->I(Lcom/duolingo/feature/chess/match/j;Lcom/duolingo/data/chess/match/domain/ChessMatchEndOutcome;Ljava/lang/Integer;ZLcom/duolingo/data/chess/match/network/ChessMatchEndCondition;Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;Ll89;I)Ljava/lang/Object;",
@@ -53,6 +57,10 @@
       "pvpSession": "tr6",
       "setupModel": "nx5",
       "square": "h55"
+    },
+    "fields": {
+      "botPlayerColor": "Lcom/duolingo/feature/chess/match/j;->e0:Lcom/duolingo/chess/model/ChessPlayerColor;",
+      "pvpPlayerColor": "Ltr6;->L:Lcom/duolingo/data/chess/match/network/ChessMatchPlayerColor;"
     },
     "methods": {
       "botExit": "Lcom/duolingo/feature/chess/match/j;->N(Lcom/duolingo/data/chess/match/domain/ChessMatchClientEndCondition;)V",

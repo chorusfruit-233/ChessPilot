@@ -65,6 +65,7 @@ class MainActivity : Activity() {
     private lateinit var kvEngine: TextView
     private lateinit var kvBackend: TextView
     private lateinit var kvFen: TextView
+    private lateinit var kvUserColor: TextView
     private lateinit var kvThink: TextView
     private lateinit var kvAuto: TextView
     private lateinit var kvPonder: TextView
@@ -263,6 +264,7 @@ class MainActivity : Activity() {
         kvEngine = kv("引擎")
         kvBackend = kv("算力后端")
         kvFen = kv("当前局面", mono = true)
+        kvUserColor = kv("执棋颜色")
         kvThink = kv("思考设置")
         kvAuto = kv("自动走棋")
         kvPonder = kv("极限思考")
@@ -541,7 +543,8 @@ class MainActivity : Activity() {
             winBar.set(0f, Ui.T3)
             bestSub.text = ""
         } else if (s.bestMove != null) {
-            moveCap.text = if (BridgeSettings.autoPlayEnabled) "自动走棋中" else "最佳招法"
+            val ourTurn = s.userColor != null && s.userColor == s.fen.split(' ').getOrNull(1)
+            moveCap.text = if (BridgeSettings.autoPlayEnabled && ourTurn) "自动走棋中" else "最佳招法"
             bestMoveTv.text = s.bestMove
             bestMoveTv.setTextColor(if (BridgeSettings.autoPlayEnabled) Ui.GOLD else Ui.T1)
             winRateTv.text = s.winText
@@ -558,7 +561,7 @@ class MainActivity : Activity() {
             winBar.set(0f, Ui.T3)
             bestSub.text = ""
         }
-        board.setFen(s.fen)
+        board.setFen(s.fen, s.userColor)
 
         kvHook.text = s.hookLine
         kvHook.setTextColor(if (s.hookLine.startsWith("已连接")) ChessMath.C_WIN else Ui.T2)
@@ -569,6 +572,11 @@ class MainActivity : Activity() {
         kvEngine.text = s.engineResLine
         kvBackend.text = s.backendLine
         kvFen.text = s.fen.ifEmpty { "—" }
+        kvUserColor.text = when (s.userColor) {
+            "b" -> "黑方"
+            "w" -> "白方"
+            else -> "待确认"
+        }
         kvThink.text = s.settingsLine
         kvAuto.text = s.autoLine
         kvAuto.setTextColor(if (s.autoLine.startsWith("开")) ChessMath.C_MID else Ui.T2)

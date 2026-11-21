@@ -124,7 +124,8 @@ object EngineLoop {
 
     private fun isPlayable(position: Position): Boolean {
         val latest = pending
-        return latest.gameId == position.gameId && latest.fen == position.fen && latest.end == null
+        return latest.gameId == position.gameId && latest.fen == position.fen &&
+            latest.user == position.user && latest.end == null
     }
 
     // ---------------------------------------------------------- ponder -----
@@ -615,21 +616,24 @@ object EngineLoop {
             val priorEnd = if (newGame || legacyStart) null else previous.end
             val end = position.end?.let { priorEnd?.followedBy(it) ?: it } ?: priorEnd
             val fen = position.fen ?: previous.fen.takeUnless { newGame }
-            pending = position.copy(fen = fen, end = end)
+            val user = chessColor(position.user) ?: previous.user.takeUnless { newGame || legacyStart }
+            val turn = chessColor(fen?.split(' ')?.getOrNull(1)) ?: chessColor(position.turn)
+            val colorChanged = previous.fen != null && !newGame && !legacyStart && previous.user != user
+            pending = position.copy(fen = fen, user = user, turn = turn, end = end)
             if (position.fen != null) lastPositionAt = System.currentTimeMillis()
             else if (newGame) lastPositionAt = 0
             lastPositionFen = fen
-            lastUserColor = position.user?.lowercase()
-            lastTurnColor = fen?.split(' ')?.getOrNull(1)?.lowercase()?.takeIf { it == "w" || it == "b" }
-                ?: position.turn?.lowercase()
+            lastUserColor = user
+            lastTurnColor = turn
 
             val endedNow = end != null && priorEnd == null
-            val cancelled = if (newGame || endedNow) {
+            val cancelled = if (newGame || endedNow || colorChanged) {
                 clearRecommendation()
                 currentFen = fen
                 ponderSession?.cancel()
                 ponderSession = null
                 BridgeServer.discardQueuedMoves()
+                if (colorChanged) BridgeServer.pushClear(gameId)
                 val active = analysingClient
                 analysingClient = null
                 if (client === active) client = null
@@ -657,6 +661,8 @@ object EngineLoop {
             try { engine.stop() } catch (e: Exception) { Log.w(TAG, "game end cleanup: $e") }
         }
     }
+
+    private fun chessColor(color: String?) = color?.lowercase()?.takeIf { it == "w" || it == "b" }
 
     private fun clearRecommendation() {
         analysedFen = null
@@ -837,6 +843,7 @@ object EngineLoop {
         }
         synchronized(pendingLock) {
             if (!isPlayable(position)) return
+            val autoplay = BridgeSettings.autoPlayEnabled && user != null && user == stm
             analysedFen = fen
             lastPushedMove = best.uci
             lastPushedFen = fen
@@ -854,32 +861,13 @@ object EngineLoop {
             note("最佳招法 ${best.uci}（深度${best.depth}，cp=${best.scoreCp}，$wr$ponderNote）")
             if (ponderHit) note("极限思考${lastPonderHit.orEmpty()}，复用预计算结果")
             BridgeServer.pushBestmove(
-                best.uci, fen, BridgeSettings.autoPlayEnabled, BridgeSettings.autoPlayDelayMs, ponderHit, position.gameId,
+                best.uci, fen, autoplay, BridgeSettings.autoPlayDelayMs, ponderHit, position.gameId,
             )
             OverlayManager.showBestMove(
-                best.uci, fen, best.scoreCp, BridgeSettings.autoPlayEnabled, user,
+                best.uci, fen, best.scoreCp, autoplay, user,
                 best.depth, ponderHit = ponderHit,
             )
         }
-    }
-
-    /**
-     * Re-render the cached bestmove under corrected colors (Bug 4 fix): the
-     * engine result is still valid, only the perspective changed — no new
-     * search, just re-derive the display triple and repaint the banner.
-     * No-op when there is no cached result for this fen (e.g. terminal).
-     */
-    private fun refreshPerspective(fen: String, user: String?) = synchronized(pendingLock) {
-        val m = lastPushedMove
-        val f = lastPushedFen
-        if (pending.end != null || m == null || f != fen || f != analysedFen || f != pending.fen) return@synchronized
-        lastScoreUser = user
-        lastError = null
-        OverlayManager.showBestMove(
-            m, fen, lastScoreCp, BridgeSettings.autoPlayEnabled, user, lastDepth,
-            ponderHit = lastResultFromPonder,
-        )
-        note("颜色修正：胜率视角已更新")
     }
 
     /** Second banner line while waiting: keep the last conclusion visible. */
@@ -944,6 +932,7 @@ object EngineLoop {
         val ponderLine: String,
         val backendLine: String,
         val fen: String,
+        val userColor: String?,
         val bestMove: String?,
         val bestAgo: String,
         val winText: String,
@@ -983,6 +972,7 @@ object EngineLoop {
             ponderLine = ponderLine(),
             backendLine = backendLine(),
             fen = currentFen ?: "-",
+            userColor = pending.user,
             bestMove = lastBestMove.takeIf { end == null },
             bestAgo = if (lastBestMove != null) ago(lastBestMoveAt) else "",
             winText = if (lastBestMove != null) {
@@ -1021,7 +1011,8 @@ object EngineLoop {
     fun playPendingBestmove() = synchronized(pendingLock) {
         val m = lastPushedMove
         val f = lastPushedFen
-        if (pending.end != null || m == null || f == null || f != analysedFen || f != pending.fen) {
+        if (pending.end != null || pending.user == null || pending.user != pending.turn ||
+            m == null || f == null || f != analysedFen || f != pending.fen) {
             note("点走棋：当前无可走招法")
             return@synchronized
         }
@@ -1073,10 +1064,8 @@ object EngineLoop {
     private fun runLoop(gen: Long) {
         var restarts = 0
         var lastAnalysedFen: String? = null
-        // Colors the last analysis was published under (Bug 4: same-fen color
-        // corrections refresh the display instead of re-searching).
+        // A color correction can change whether this same FEN belongs to us.
         var lastAnalysedUser: String? = null
-        var lastAnalysedTurn: String? = null
         var prevFen: String? = null
         var previousGameId: String? = null
         var lastSkippedFen: String? = null
@@ -1138,7 +1127,6 @@ object EngineLoop {
                 if (gameId != previousGameId || legacyStart) {
                     lastAnalysedFen = null
                     lastAnalysedUser = null
-                    lastAnalysedTurn = null
                     lastSkippedFen = null
                     lastWaitingDetail = null
                     settleFen = null
@@ -1166,18 +1154,7 @@ object EngineLoop {
                 previousGameId = gameId
                 prevFen = fen
                 if (!isPlayable(position)) continue
-                if (fen == lastAnalysedFen) {
-                    // Same-FEN color correction: the hook republishes an
-                    // unchanged position when lagging turn/user fields catch
-                    // up. Perspective is pure display — refresh it from the
-                    // cached result instead of burning a re-search.
-                    if (user != lastAnalysedUser || turn != lastAnalysedTurn) {
-                        val perspectiveChanged =
-                            user?.lowercase() != lastAnalysedUser?.lowercase()
-                        lastAnalysedUser = user
-                        lastAnalysedTurn = turn
-                        if (perspectiveChanged) refreshPerspective(fen, user)
-                    }
+                if (fen == lastAnalysedFen && user == lastAnalysedUser) {
                     maybeNoteStale()
                     Thread.sleep(60)
                     continue
@@ -1197,22 +1174,12 @@ object EngineLoop {
                 }
                 currentFen = fen
 
-                val parts = fen.split(' ')
-                val stm = parts.getOrNull(1)
-                // Colors arrive in mixed case (hook getSymbol() yields "B"/"W", FEN
-                // yields "b"/"w") — compare case-insensitively, or black/white gets
-                // mis-skipped as "opponent's turn" forever.
-                // The board FEN is authoritative. Model turn metadata can still
-                // describe the opponent while this FEN already belongs to us;
-                // using it would restart ponder and discard our prepared reply.
-                val t = stm?.lowercase()?.takeIf { it == "w" || it == "b" } ?: turn?.lowercase()
-                val u = user?.lowercase() ?: turn?.lowercase()
-                val userIsToMove = t == u
+                val stm = turn
                 // Only analyse when it's the user's move (their decision is what we assist).
                 // Deliberately NOT marking lastAnalysedFen here: a skip decided on
                 // lagging turn/user fields must be re-evaluated when corrected values
                 // arrive (same fen). Marking it poisoned the position forever.
-                if (!userIsToMove && user != null) {
+                if (user != null && stm != user) {
                     // Opponent's clock is free thinking time when ponder is on.
                     // Start the job BEFORE painting so the overlay suffix below
                     // reflects the live job, not last iteration's state.
@@ -1261,7 +1228,6 @@ object EngineLoop {
                     if (!isPlayable(position)) continue
                     lastAnalysedFen = fen
                     lastAnalysedUser = user
-                    lastAnalysedTurn = turn
                     publishBest(position, fen, stm, pondered, ponderHit = true)
                     continue
                 }
@@ -1292,7 +1258,7 @@ object EngineLoop {
                     if (isStale() || !isPlayable(position)) false
                     else {
                         analysingClient = engine
-                        OverlayManager.showThinking(BridgeSettings.autoPlayEnabled)
+                        OverlayManager.showThinking(BridgeSettings.autoPlayEnabled && user != null)
                         true
                     }
                 }
@@ -1313,7 +1279,6 @@ object EngineLoop {
                 if (best != null) {
                     lastAnalysedFen = fen
                     lastAnalysedUser = user
-                    lastAnalysedTurn = turn
                     // Tripwire for stream cross-talk (the ponder saga class of bug):
                     // a bestmove from a search murdered at depth<=1 with a real
                     // time budget means something else talked to the engine mid-

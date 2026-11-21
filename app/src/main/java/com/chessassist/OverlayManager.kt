@@ -376,7 +376,8 @@ object OverlayManager {
             detailTv?.visibility = View.VISIBLE
             detailTv?.setTextColor(ChessMath.winRateColor(rate))
             setSpinner(autoplay)
-            if (autoplay) setPlayButton(false, "自动") else setPlayButton(true, "走棋")
+            if (autoplay) setPlayButton(false, "自动")
+            else setPlayButton(userColor != null && userColor.equals(stm, ignoreCase = true), "走棋")
         }
     }
 

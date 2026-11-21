@@ -80,7 +80,8 @@ class AutoPlayer(private val bridge: StateBridge) {
      */
     @Synchronized
     fun performMove(uci: String, cmdFen: String, gameId: String?, gapMs: Long? = null) {
-        if (!HookRuntime.active || !bridge.canPlay(gameId, cmdFen)) {
+        val orientation = bridge.tapOrientation(gameId, cmdFen)
+        if (!HookRuntime.active || orientation == null) {
             MainHook.log("autoplay skipped: position is no longer playable ($uci)")
             return
         }
@@ -97,7 +98,7 @@ class AutoPlayer(private val bridge: StateBridge) {
             requestManualPromotion(uci)
             return
         }
-        val flipped = bridge.lastUserColor == "b"
+        val flipped = orientation == "b"
         val gap = (gapMs ?: DEFAULT_GAP_MS).coerceIn(150L, 1500L)
         // Per-position attempt budget (resets on a new fen/move pair).
         val key = "$gameId|$cmdFen|$uci"
@@ -120,7 +121,7 @@ class AutoPlayer(private val bridge: StateBridge) {
         activeKey = key
 
         mainHandler.post {
-            if (isSuperseded(key, gameId, cmdFen, uci)) return@post
+            if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return@post
             // Resolve the view on the main thread (layout bounds valid here), with a
             // lazy rescan if the constructor hook missed it.
             val view = RiveViewFinder.bestRiveView() ?: RiveViewFinder.ensure() ?: run {
@@ -149,7 +150,7 @@ class AutoPlayer(private val bridge: StateBridge) {
         view: View, uci: String, flipped: Boolean, gap: Long,
         gameId: String?, cmdFen: String, key: String,
     ) {
-        if (isSuperseded(key, gameId, cmdFen, uci)) return
+        if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return
         if (!view.isShown || !view.isAttachedToWindow) {
             finishFlight(key)
             return
@@ -163,13 +164,13 @@ class AutoPlayer(private val bridge: StateBridge) {
         tapSquare(view, from, flipped)
         mainHandler.postDelayed({
             try {
-                if (isSuperseded(key, gameId, cmdFen, uci)) return@postDelayed
+                if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return@postDelayed
                 if (!view.isShown || !view.isAttachedToWindow) {
                     finishFlight(key)
                     return@postDelayed
                 }
                 tapSquare(view, to, flipped)
-                if (!isSuperseded(key, gameId, cmdFen, uci)) {
+                if (!isSuperseded(key, gameId, cmdFen, uci, flipped)) {
                     scheduleAppliedCheck(view, uci, flipped, gap, gameId, cmdFen, key)
                 }
             } catch (t: Throwable) {
@@ -184,8 +185,9 @@ class AutoPlayer(private val bridge: StateBridge) {
     }
 
     /** True when this chain is no longer current: superseded, or board moved on. */
-    private fun isSuperseded(key: String, gameId: String?, fen: String, uci: String): Boolean {
-        if (activeKey == key && HookRuntime.active && bridge.canPlay(gameId, fen)) return false
+    private fun isSuperseded(key: String, gameId: String?, fen: String, uci: String, flipped: Boolean): Boolean {
+        val orientation = if (flipped) "b" else "w"
+        if (activeKey == key && HookRuntime.active && bridge.tapOrientation(gameId, fen) == orientation) return false
         MainHook.log("autoplay: dropping obsolete tap for $uci")
         finishFlight(key)
         return true
@@ -216,7 +218,7 @@ class AutoPlayer(private val bridge: StateBridge) {
     ) {
         mainHandler.postDelayed({
             try {
-                if (isSuperseded(key, gameId, cmdFen, uci)) return@postDelayed
+                if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return@postDelayed
                 val uci4 = uci.take(4)
                 val applied = bridge.lastMoves.takeLast(3).any { it.take(4) == uci4 }
                 if (applied) {

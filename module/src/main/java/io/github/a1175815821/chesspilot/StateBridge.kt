@@ -16,20 +16,24 @@ class StateBridge(
     private val moveGetter: String = "b",
 ) {
 
-    private data class Board(val id: String = UUID.randomUUID().toString(), val fen: String? = null, val end: GameEnd? = null)
+    private data class Board(
+        val id: String = UUID.randomUUID().toString(), val fen: String? = null,
+        val user: String? = null, val orientation: String? = null, val end: GameEnd? = null,
+    ) {
+        fun isPlayable(game: String?, position: String) = id == game && fen == position && end == null
+    }
     private data class ConstructedState(val setup: Any, val state: Any)
 
     @Volatile private var board = Board()
     val lastFen: String? get() = board.fen
     val gameId: String get() = board.id
+    val lastUserColor: String? get() = board.user
     private var controller: Any? = null
     private var setup: Any? = null
     private var constructedState: ConstructedState? = null
     private var miniMatchId: String? = null
     private val retiredControllers = WeakHashMap<Any, Unit>()
-
-    @Volatile var lastUserColor: String? = null   // "w" | "b"
-        private set
+    private val playerColors = WeakHashMap<Any, String>()
 
     @Volatile var lastTurnColor: String? = null
         private set
@@ -54,13 +58,12 @@ class StateBridge(
             if (!sameController) controller?.let { retiredControllers[it] = Unit }
             controller = owner
             miniMatchId = matchId
-            board = Board()
-            lastUserColor = null
+            board = Board(user = playerColors[owner])
             lastTurnColor = null
             lastMoves = emptyList()
             lastRenderProcessAt = 0
             BridgeAccess.lastState = null
-            BridgeAccess.lastUserColor = null
+            BridgeAccess.boardColor = null
             BridgeAccess.boardController = owner
             CommandLoop.cancelPendingMove()
             BridgePublisher.resetPosition()
@@ -80,9 +83,33 @@ class StateBridge(
         true
     }
 
-    fun canPlay(game: String?, fen: String): Boolean {
+    fun canPlay(game: String?, fen: String): Boolean = board.isPlayable(game, fen)
+
+    /** The native board layout can differ from the color assigned to the player. */
+    fun tapOrientation(game: String?, fen: String): String? {
         val current = board
-        return current.id == game && current.fen == fen && current.end == null
+        val user = current.user ?: return null
+        if (!current.isPlayable(game, fen) || !user.equals(fen.split(' ').getOrNull(1), ignoreCase = true)) return null
+        return current.orientation ?: user
+    }
+
+    fun onPlayerColor(owner: Any, color: Any) = synchronized(lock) {
+        val user = colorSymbol(color) ?: return@synchronized
+        if (retiredControllers.containsKey(owner) || playerColors.put(owner, user) == user) return@synchronized
+        if (controller === owner && board.end == null && board.user != user) {
+            updatePosition(board.fen, user, board.orientation)
+            publishSnapshot()
+        }
+    }
+
+    private fun updatePosition(fen: String?, user: String?, orientation: String?) {
+        val changedColor = board.user != user
+        board = board.copy(fen = fen, user = user, orientation = orientation)
+        BridgeAccess.boardColor = orientation ?: user
+        if (changedColor) {
+            CommandLoop.cancelPendingMove()
+            BridgePublisher.resetPosition()
+        }
     }
 
     /** Order bridge commands against end/setup events before scheduling UI work. */
@@ -126,17 +153,16 @@ class StateBridge(
             if (board.end != null) return@synchronized
             if (src != "render" && setup != null && setup !== stateSetup) return@synchronized
             val fen = extractFen(state) ?: return@synchronized
-            val user = extractColor(state, "d")   // d = userColor
+            val orientation = extractColor(state, "d") ?: board.orientation
+            val user = controller?.let(playerColors::get) ?: orientation ?: board.user
             val turn = extractColor(state, "e")   // e = turnColor
             val moves = extractMoves(state)       // f = List<Move>
             if (src == "render") setup = stateSetup
             BridgeAccess.lastState = state
-            board = board.copy(fen = fen)
-            lastUserColor = user ?: lastUserColor
+            updatePosition(fen, user, orientation)
             lastTurnColor = turn
             lastMoves = moves
             lastUpdateAt = System.currentTimeMillis()
-            if (user != null) BridgeAccess.lastUserColor = user
             publishSnapshot()
         } catch (t: Throwable) {
             MainHook.log("onGameState failed: $t")
@@ -153,6 +179,8 @@ class StateBridge(
         miniMatchId?.let { saved["miniMatchId"] = it }
         lastFen?.let { saved["fen"] = it }
         lastUserColor?.let { saved["user"] = it }
+        controller?.let(playerColors::get)?.let { saved["assignedColor"] = it }
+        board.orientation?.let { saved["orientation"] = it }
         lastTurnColor?.let { saved["turn"] = it }
         saved["moves"] = java.util.ArrayList(lastMoves)
     }
@@ -162,12 +190,15 @@ class StateBridge(
         controller = owner
         miniMatchId = saved["miniMatchId"] as? String
         val end = (saved["end"] as? String)?.let { GameEnd(it, saved["outcome"] as? String) }
-        board = Board(saved["game"] as? String ?: board.id, saved["fen"] as? String, end)
-        lastUserColor = saved["user"] as? String
+        val assigned = saved["assignedColor"] as? String
+        if (owner != null && assigned != null) playerColors[owner] = assigned
+        val user = assigned ?: saved["user"] as? String
+        val orientation = saved["orientation"] as? String
+        board = Board(saved["game"] as? String ?: board.id, saved["fen"] as? String, user, orientation, end)
         lastTurnColor = saved["turn"] as? String
         lastMoves = (saved["moves"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
         lastUpdateAt = System.currentTimeMillis()
-        BridgeAccess.lastUserColor = lastUserColor
+        BridgeAccess.boardColor = orientation ?: user
         publishSnapshot()
     }
 
@@ -235,13 +266,12 @@ class StateBridge(
             if (parts.size != 6 || parts[0].count { it == '/' } != 7) return
             val turn = parts[1].lowercase()
             if (turn != "w" && turn != "b") return
-            val user = if (Reflect.getBooleanField(model, "c")) turn else if (turn == "w") "b" else "w"
-            board = board.copy(fen = fen)
-            lastUserColor = user
+            val orientation = if (Reflect.getBooleanField(model, "c")) turn else if (turn == "w") "b" else "w"
+            val user = controller?.let(playerColors::get) ?: orientation
+            updatePosition(fen, user, orientation)
             lastTurnColor = turn
             lastMoves = moveUcis(history)
             lastUpdateAt = System.currentTimeMillis()
-            BridgeAccess.lastUserColor = user
         } catch (t: Throwable) {
             MainHook.log("board setup position unavailable: $t")
         }
@@ -272,12 +302,13 @@ class StateBridge(
         } catch (_: Throwable) { null }
     }
 
-    // Live 6.85.7 returns UPPERCASE "B"/"W" here (docs said lowercase — wrong),
-    // while FEN-derived turns are lowercase. Normalize everything to lowercase at
-    // the boundary so engine-side "b"=="B" style comparisons can never mis-skip.
-    private fun colorSymbol(colorObj: Any): String? = try {
-        (Reflect.callMethod(colorObj, "getSymbol") as? String)?.lowercase()
-    } catch (_: Throwable) { null }
+    private fun colorSymbol(colorObj: Any): String? = when ((colorObj as? Enum<*>)?.name) {
+        "WHITE" -> "w"
+        "BLACK" -> "b"
+        else -> try {
+            (Reflect.callMethod(colorObj, "getSymbol") as? String)?.lowercase()?.takeIf { it == "w" || it == "b" }
+        } catch (_: Throwable) { null }
+    }
 
     /** ChessGameState.f contains the moves in play order. */
     private fun extractMoves(state: Any): List<String> {
