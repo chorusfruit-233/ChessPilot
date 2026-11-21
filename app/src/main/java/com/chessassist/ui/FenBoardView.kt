@@ -38,13 +38,15 @@ class FenBoardView(context: Context) : View(context) {
     /** 64 格，a8 在 index 0；' ' = empty square. */
     private val cells = CharArray(64)
     private var stmWhite = true
+    private var blackOnBottom = false
 
     init {
         // 初始为空棋盘（引擎未收到局面前的状态）。
         cells.fill(' ')
     }
 
-    fun setFen(fen: String?) {
+    fun setFen(fen: String?, userColor: String?) {
+        blackOnBottom = userColor == "b"
         try {
             cells.fill(' ')
             if (fen.isNullOrBlank()) {
@@ -104,7 +106,8 @@ class FenBoardView(context: Context) : View(context) {
                 val left = c * cell
                 val top = r * cell
                 canvas.drawRect(left, top, left + cell, top + cell, if ((r + c) % 2 == 0) lightPaint else darkPaint)
-                val p = cells[r * 8 + c]
+                val index = r * 8 + c
+                val p = cells[if (blackOnBottom) 63 - index else index]
                 if (p != ' ') {
                     val glyph = glyphOf(p)
                     val paint = if (p.isUpperCase()) whitePiece else blackPiece

@@ -7,6 +7,7 @@ internal class MatchEndHooks(
     private val table: Remap, private val loader: ClassLoader, private val bridge: StateBridge,
 ) {
     private val controllerGetter = table.method(loader, "sessionController")
+    private val pvpColor = table.field(loader, "pvpPlayerColor")
 
     fun install() {
         before("botGameEnd") { chain ->
@@ -24,7 +25,7 @@ internal class MatchEndHooks(
             val data = chain.getArg(0) ?: return@before
             val reason = name(Reflect.getObjectField(data, "b")) ?: "COMPLETED"
             val winner = name(Reflect.getObjectField(data, "a"))
-            val player = chain.thisObject?.let { name(Reflect.getObjectField(it, "L")) }
+            val player = chain.thisObject?.let { name(pvpColor.get(it)) }
             val outcome = when {
                 winner == "DRAW" -> "DRAW"
                 winner in listOf("WHITE", "BLACK") && player != null -> if (winner == player) "WIN" else "LOSS"

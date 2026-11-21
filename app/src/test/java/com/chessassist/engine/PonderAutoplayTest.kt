@@ -96,6 +96,86 @@ class PonderAutoplayTest {
         reader.invoke(BridgeServer, snapshot.toString())
     }
 
+    @Test fun assignedBlackWaitsForWhiteDespiteTheOpeningModelsOrientation() {
+        val board = StateBridge()
+        val controller = Any()
+        val setup = NativeSetup(target, emptyList(), true)
+        board.onPlayerColor(controller, NativeColor.BLACK)
+        board.onBoardSetup(
+            controller, model = setup,
+            liveState = NativeState(NativeFen(target), setup, NativeColor.WHITE, NativeColor.WHITE, emptyList()),
+        )
+        assertEquals("b", board.lastUserColor)
+        assertNull(board.tapOrientation(board.gameId, target))
+        deliver(get(BridgeClient, "lastSnapshot"))
+        main.analysisResult = BestMove("e7e5", null, 20, 16)
+        startWorker()
+        Thread.sleep(550)
+        assertEquals("b", EngineLoop.snapshot().userColor)
+        assertEquals(0, main.analyses.get())
+        assertTrue(commands().none { it.optString("t") == "bestmove" })
+
+        val saved = HashMap<String, Any>()
+        board.saveForReload(saved)
+        val restored = StateBridge()
+        restored.restoreAfterReload(saved, controller)
+        restored.onGameState(
+            NativeState(NativeFen(source), setup, NativeColor.WHITE, NativeColor.BLACK, listOf(NativeMove("e2e4"))),
+        )
+        assertEquals("b", restored.lastUserColor)
+        assertEquals("w", restored.tapOrientation(restored.gameId, source))
+        deliver(get(BridgeClient, "lastSnapshot"))
+        val command = waitForCommand()
+        assertEquals(source, command.getString("fen"))
+        assertEquals("e7e5", command.getString("move"))
+        assertEquals("1", command.getString("autoplay"))
+        assertEquals("b", EngineLoop.lastScoreUser)
+    }
+
+    @Test fun colorCorrectionCancelsAWhiteSearchEvenWhenTheFenDoesNotChange() {
+        val board = StateBridge()
+        val controller = Any()
+        val setup = NativeSetup(target, emptyList(), true)
+        board.onBoardSetup(controller, model = setup)
+        assertEquals("w", board.tapOrientation(board.gameId, target))
+        deliver(get(BridgeClient, "lastSnapshot"))
+        val entered = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        main.onAnalyse = {
+            entered.countDown()
+            check(cancelled.await(3, TimeUnit.SECONDS))
+            returned.countDown()
+        }
+        main.onStopEngine = { cancelled.countDown() }
+        startWorker()
+        try {
+            assertTrue("White analysis never started", entered.await(3, TimeUnit.SECONDS))
+            board.onPlayerColor(controller, NativeColor.BLACK)
+            assertNull(board.tapOrientation(board.gameId, target))
+            deliver(get(BridgeClient, "lastSnapshot"))
+            assertTrue("Correction did not stop the old search", returned.await(2, TimeUnit.SECONDS))
+            assertEquals("b", EngineLoop.snapshot().userColor)
+            EngineLoop.playPendingBestmove()
+            assertTrue(commands().none { it.optString("t") in listOf("bestmove", "play") })
+        } finally {
+            cancelled.countDown()
+        }
+    }
+
+    @Test fun aFenWithoutTheAssignedColorCannotTriggerEitherPlayMode() {
+        val board = StateBridge()
+        board.onBoardSetup(Any())
+        board.acceptExternalFen(target)
+        assertNull(board.tapOrientation(board.gameId, target))
+        deliver(get(BridgeClient, "lastSnapshot"))
+        startWorker()
+        assertEquals("0", waitForCommand().getString("autoplay"))
+        EngineLoop.playPendingBestmove()
+        assertNull(EngineLoop.snapshot().userColor)
+        assertTrue(commands().none { it.optString("t") == "play" })
+    }
+
     @Test fun openingSurvivesNativeSetupAndReachesTheEngineOverTheSocket() {
         val board = StateBridge()
         val model = NativeSetup(null, listOf(NativeMove("e2e4"), NativeMove("e7e5")), true)

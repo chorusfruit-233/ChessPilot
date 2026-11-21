@@ -10,6 +10,7 @@ import java.lang.reflect.Modifier
 internal class DexRemapper(private val dex: DexKitBridge) {
     private val classes = mutableMapOf<String, String>()
     private val methods = mutableMapOf<String, String>()
+    private val fields = mutableMapOf<String, String>()
 
     fun discover(): JSONObject {
         val fen = model("chessFen", "ChessFen(piecePlacementString=")
@@ -55,6 +56,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
         })
         discoverResults(controller.name, fen.name, opening.descriptor)
         return JSONObject().put("classes", JSONObject(classes)).put("methods", JSONObject(methods))
+            .put("fields", JSONObject(fields))
     }
 
     private fun discoverResults(controller: String, fen: String, setup: String) {
@@ -69,6 +71,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
         val session = requireNotNull(bot.superClass) { "live chess session missing" }
         classes["botSession"] = bot.name
         classes["chessSession"] = session.name
+        rememberPlayerColor("botPlayerColor", bot, COLOR)
         remember("botGameEnd", listOf(botFinish))
         remember("botExit", bot.methods.filter { it.matches("void", CLIENT_END) })
         remember("sessionController", session.methods.filter { it.matches(controller) })
@@ -82,7 +85,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
                 it.paramTypeNames.size == 2 && it.paramTypeNames.first() == pvpPayload.name
         })
         val pvp = requireNotNull(pvpEnd.declaredClass)
-        pvp.requireFields("L" to "${MATCH}network.ChessMatchPlayerColor")
+        rememberPlayerColor("pvpPlayerColor", pvp, "${MATCH}network.ChessMatchPlayerColor")
         classes["pvpSession"] = pvp.name
 
         val roundEnd = remember("miniGameEnd", dex.findMethod {
@@ -133,6 +136,12 @@ internal class DexRemapper(private val dex: DexKitBridge) {
 
     private fun remember(role: String, candidates: List<MethodData>): MethodData =
         candidates.unique(role).also { methods[role] = it.descriptor }
+
+    private fun rememberPlayerColor(role: String, session: ClassData, colorType: String) {
+        val field = session.fields.filter { it.typeName == colorType && !Modifier.isStatic(it.modifiers) }
+            .unique(role)
+        fields[role] = field.descriptor
+    }
 
     private fun ClassData.requireFields(vararg expected: Pair<String, String>) {
         val actual = fields.associate { it.name to it.typeName }

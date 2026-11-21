@@ -14,6 +14,7 @@ the hooks. The control screen reports the installed version and any failure.
 | Board setup and live state | `mz6.O(nx5)` and `mz6.J()` | `qe7.P(ca6)` and `qe7.J()` |
 | Full FEN and UCI move | `dm5.b()` and `gf6.b()` | `xx5.c()` and `kt6.d()` |
 | PvP result | `tr6.G(ar6, pq8)` | `o67.G(t57, l89)` |
+| Assigned color | Bot `j.e0`, PvP `tr6.L` | Bot `j.d0`, PvP `o67.L` |
 | Mini match start and result | `k25.j(bd6)` and `k25.m(…)` | `bd5.j(zq6)` and `bd5.m(…)` |
 
 The bundled profiles in `module/src/main/assets/dex-profiles.json` were obtained
@@ -21,6 +22,10 @@ by running the Kotlin resolver through DexKit's desktop JNI library on the
 actual base APKs. Each profile records the base APK SHA-256. The fingerprint
 is SHA-256 over the DEX entries sorted by name, with one UTF-8 line containing
 name, uncompressed size and CRC32 for each entry.
+
+The session controller getter associates the assigned color with its live board.
+The bridge sends that assignment to the engine for turn checks. Rive uses the
+live chess state's view orientation to convert squares to touch coordinates.
 
 ## Earlier reference APK: 6.105.2 / versionCode 2497
 

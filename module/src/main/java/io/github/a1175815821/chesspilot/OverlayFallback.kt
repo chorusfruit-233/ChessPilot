@@ -119,7 +119,7 @@ object OverlayFallback {
         val size = minOf(view.width, view.height).toFloat()
         val cell = size / 8f
         // Mirror AutoPlayer.squareToScreen: black boards are rotated 180°.
-        val flipped = BridgeAccess.lastUserColor == "b"
+        val flipped = BridgeAccess.boardColor == "b"
         fun pt(sq: String): Pair<Float, Float> {
             val file = sq[0] - 'a'; val rank = sq[1] - '1'
             val col = if (flipped) 7 - file else file
