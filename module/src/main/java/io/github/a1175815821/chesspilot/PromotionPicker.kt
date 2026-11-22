@@ -12,6 +12,10 @@ internal class PromotionPicker(
     private val selectedMoves: Field,
     private val moveUci: Method,
     private val liveState: Method,
+    private val moveFrom: Field,
+    private val pieceAt: Method,
+    private val pieceId: Field,
+    val menu: RivePromotionMenu,
     pieceType: Class<*>,
 ) {
     private val pieceValues: Map<Char, Int>
@@ -43,20 +47,24 @@ internal class PromotionPicker(
             it.length == 5 && it[4] in pieceValues && it.regionMatches(0, uci, 0, 4)
         } == true
 
-    fun canChoose(state: Any, uci: String): Boolean {
-        val moves = selectedMoves.get(state) as? List<*> ?: return false
+    fun selectedPawnId(state: Any, uci: String): String? {
+        val moves = selectedMoves.get(state) as? List<*> ?: return null
         // The native callback uses the first move to the destination square.
         val move = moves.asSequence().filterNotNull().firstOrNull {
             (moveUci.invoke(it) as? String)?.regionMatches(2, uci, 2, 2) == true
-        } ?: return false
-        return matchesPreview(move, uci)
+        } ?: return null
+        if (!matchesPreview(move, uci)) return null
+        val from = moveFrom.get(move) ?: return null
+        val pawn = pieceAt.invoke(state, from) ?: return null
+        return pieceId.get(pawn) as? String
     }
 
-    fun select(controller: Any, uci: String, flipped: Boolean) {
+    fun select(controller: Any, uci: String, flipped: Boolean, finishMenu: (Int) -> Unit) {
         val rank = uci[3] - '0'
         val file = uci[2] - 'a' + 1
         val piece = pieceValues.getValue(uci[4])
         choose.invoke(controller, if (flipped) 9 - rank else rank, if (flipped) 9 - file else file, piece)
         reset.invoke(controller)
+        finishMenu(piece)
     }
 }

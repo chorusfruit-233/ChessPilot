@@ -38,9 +38,14 @@ The promotion profile is optional. DexKit identifies the choice callback via
 `ChessPieceType.getRiveValue()` and `ChessHaptic.PROMOTED_PAWN`, the preview via
 the destination handler, and the reset via the native `PROMOTION_EVENT` handler.
 The choice callback reads the selected pawn's legal moves in `ox5.h` / `da6.h`.
-It takes the one-based Rive row, column and piece value. ChessPilot checks the live
-FEN and the matching preview before submitting the UCI suffix's piece and running
-the native reset. The move history retains the full promotion suffix.
+It takes the one-based Rive row, column and piece value. After the live FEN and
+preview match, ChessPilot obtains the selected pawn's ID from the native board.
+On the legacy Rive layout, the pawn's nested `promote_trigger_q/r/b/n` input
+runs the menu transition and emits `promoted_event`. On the data-bound layout,
+the renderer's piece map identifies the pawn in `pieces`. Once its menu is
+open, ChessPilot applies the native choice and reset, then sends
+`complete_promotion_db_trig` to that pawn's view model. The move history retains
+the full promotion suffix.
 
 ## Earlier reference APK: 6.105.2 / versionCode 2497
 

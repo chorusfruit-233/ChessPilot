@@ -1,6 +1,7 @@
 package com.chessassist.engine
 
 import com.chessassist.PonderLimits
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** One prediction and its completed search iterations, isolated from later rounds. */
@@ -9,6 +10,7 @@ internal class PonderSession(
     val prediction: String,
     history: List<String>,
     val limits: PonderLimits = PonderLimits(),
+    private val startedAtNanos: Long = System.nanoTime(),
 ) {
     @Volatile private var history = history.toList()
     val stopFlag = AtomicBoolean(false)
@@ -16,14 +18,43 @@ internal class PonderSession(
     @Volatile var thread: Thread? = null
     @Volatile var result: BestMove? = null
         private set
+    private var completed: BestMove? = null
 
     @Synchronized fun update(best: BestMove) {
         if (!stopFlag.get()) result = best
     }
 
+    @Synchronized fun complete(best: BestMove) {
+        if (stopFlag.get()) return
+        completed = best
+        result = best
+    }
+
+    /** A streamed PV is for display. Handoff requires the final engine reply. */
+    @Synchronized fun readyResult(now: Long = System.nanoTime()): BestMove? {
+        val best = completed ?: return null
+        if (cancelled || thread?.isAlive == true) return null
+        if (best.uci == "(none)") return best
+        return best.takeIf {
+            if (limits.depth > 0) it.depth >= limits.depth else elapsedMs(now) >= limits.movetimeMs
+        }
+    }
+
+    @Synchronized fun isWaiting(now: Long = System.nanoTime()): Boolean {
+        if (stopFlag.get()) return false
+        val elapsed = elapsedMs(now)
+        val deadline = if (limits.depth > 0) SEARCH_TIMEOUT_MS else limits.movetimeMs + RESULT_GRACE_MS
+        if (thread?.isAlive == true) return elapsed < deadline
+        return completed?.uci?.let { it != "(none)" } == true &&
+            limits.depth == 0 && elapsed < limits.movetimeMs
+    }
+
+    private fun elapsedMs(now: Long) = TimeUnit.NANOSECONDS.toMillis(now - startedAtNanos)
+
     @Synchronized fun cancel() {
         cancelled = true
         stopFlag.set(true)
+        completed = null
         result = null
     }
 
@@ -61,6 +92,9 @@ internal class PonderSession(
     }
 
     companion object {
+        const val SEARCH_TIMEOUT_MS = 180_000L
+        private const val RESULT_GRACE_MS = 10_000L
+
         /** Stockfish omits en-passant targets that no adjacent pawn can use. */
         internal fun samePosition(a: String, b: String): Boolean {
             fun key(fen: String): List<String>? {

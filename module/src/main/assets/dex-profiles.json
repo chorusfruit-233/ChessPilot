@@ -45,7 +45,11 @@
     },
     "promotion": {
       "choose": "Lqe7;->N(Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)V",
+      "dbPieceIndices": "Lme7;->a:Ljava/util/Map;",
+      "moveFrom": "Lkt6;->a:Lgg5;",
       "parseMove": "Lda6;->m(Ljava/lang/String;)Lkt6;",
+      "pieceAt": "Lda6;->k(Lgg5;)Lov6;",
+      "pieceId": "Lov6;->a:Ljava/lang/String;",
       "preview": "Lqe7;->Q(Lkt6;Z)V",
       "reset": "Lqe7;->g0()V",
       "selectedMoves": "Lda6;->h:Ljava/util/List;"
@@ -97,7 +101,11 @@
     },
     "promotion": {
       "choose": "Lmz6;->N(Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)V",
+      "dbPieceIndices": "Ljz6;->a:Ljava/util/Map;",
+      "moveFrom": "Lgf6;->a:Lh55;",
       "parseMove": "Lox5;->i(Ljava/lang/String;)Lgf6;",
+      "pieceAt": "Lox5;->h(Lh55;)Leh6;",
+      "pieceId": "Leh6;->a:Ljava/lang/String;",
       "preview": "Lmz6;->P(Lgf6;Z)V",
       "reset": "Lmz6;->d0()V",
       "selectedMoves": "Lox5;->h:Ljava/util/List;"

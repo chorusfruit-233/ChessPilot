@@ -35,13 +35,11 @@ interface EngineClient {
     fun isRunning(): Boolean
     /** Analyze `fen`; depth > 0 uses `go depth`, else `go movetime`. Null on failure. */
     fun analyse(fen: String, movetimeMs: Long, depth: Int = 0): BestMove?
-    /** Ponder our reply to the predicted move until hit/stop. Null on failure. */
+    /** Search our reply to the predicted move at the given limits. Null on failure. */
     fun ponder(
         fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
         stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit,
     ): BestMove?
-    /** Signal ponderhit: the opponent played our predicted move. Best-effort. */
-    fun signalPonderHit()
     /** Abort a ponder read from another thread. Best-effort. */
     fun stopPonder()
     /** NNUE label for the status screen. */
@@ -57,8 +55,6 @@ class StockfishClient(private val context: Context) : EngineClient {
     companion object {
         private const val TAG = "StockfishClient"
         private const val IDLE_TIMEOUT_MS = 15_000L
-        /** Hard backstop for a ponder read whose stop signal got lost (about never). */
-        private const val PONDER_MAX_MS = 180_000L
     }
 
     private var process: Process? = null
@@ -395,7 +391,7 @@ class StockfishClient(private val context: Context) : EngineClient {
         var lastScoreIsMate = false
         var pdepth = 0
         var positionFen: String? = null
-        val deadline = System.currentTimeMillis() + PONDER_MAX_MS
+        val deadline = System.currentTimeMillis() + PonderSession.SEARCH_TIMEOUT_MS
         try {
             while (running.get() && !stopFlag.get() && System.currentTimeMillis() < deadline) {
                 val line = try {
@@ -438,13 +434,6 @@ class StockfishClient(private val context: Context) : EngineClient {
             try { send("stop") } catch (_: Throwable) {}
         }
         return best
-    }
-
-    /** Signal ponderhit: the opponent played our predicted move. Best-effort. */
-    override fun signalPonderHit() {
-        // A completed iteration is already available: stop returns that work
-        // immediately, including in movetime mode (ponderhit alone keeps searching).
-        try { send("stop") } catch (_: Throwable) {}
     }
 
     /** Abort the active ponder: stop emits bestmove and unblocks its reader. */

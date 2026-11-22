@@ -2,6 +2,7 @@ package io.github.a1175815821.chesspilot
 
 import android.view.MotionEvent
 import android.view.View
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -30,7 +31,9 @@ class AutoPlayer internal constructor(
     private data class PromotionAttempt(
         val key: String, val gameId: String?, val fen: String, val uci: String,
         val flipped: Boolean, val controller: Any, val view: View,
-    )
+    ) {
+        val previewAccepted = AtomicBoolean()
+    }
 
     private val pendingPromotion = AtomicReference<PromotionAttempt?>()
     private val promotion = try {
@@ -45,7 +48,7 @@ class AutoPlayer internal constructor(
                 val pending = pendingPromotion.get() ?: return@after
                 val move = chain.getArg(0) ?: return@after
                 if (chain.thisObject === pending.controller && chain.getArg(1) == true &&
-                    picker.matchesPreview(move, pending.uci)
+                    picker.matchesPreview(move, pending.uci) && pending.previewAccepted.compareAndSet(false, true)
                 ) {
                     // Run after the native tap handler has finished showing the picker.
                     mainHandler.post { HookRuntime.runIfActive { selectPromotion(picker, pending) } }
@@ -77,6 +80,8 @@ class AutoPlayer internal constructor(
         /** Max tap attempts per (fen, move). Bounded: a systematically-wrong geometry
          * must degrade to asking the user, never to an endless tap storm. */
         const val MAX_ATTEMPTS = 3
+        private const val PROMOTION_RENDER_CHECKS = 12
+        private const val PROMOTION_RENDER_INTERVAL_MS = 100L
         private val UCI_RE = Regex("[a-h][1-8][a-h][1-8][qrbn]?")
 
         /** Real UCI only (e2e4 / e7e8q): rejects engine markers like "(none)". */
@@ -258,24 +263,51 @@ class AutoPlayer internal constructor(
         return bridge.extractFen(state) == fen && picker.canPrepare(state, uci)
     }
 
-    private fun selectPromotion(picker: PromotionPicker, pending: PromotionAttempt) {
+    private fun selectPromotion(
+        picker: PromotionPicker, pending: PromotionAttempt, checksLeft: Int = PROMOTION_RENDER_CHECKS,
+    ) {
         if (pendingPromotion.get() !== pending) return
+        var waiting = false
         try {
             bridge.onPlayableBoard(pending.gameId, pending.fen) {
                 if (BridgeAccess.boardController !== pending.controller ||
-                    !pending.view.isShown || !pending.view.isAttachedToWindow
-                ) return@onPlayableBoard
-                val state = picker.readState(pending.controller) ?: return@onPlayableBoard
-                if (bridge.extractFen(state) != pending.fen || !picker.canChoose(state, pending.uci) ||
+                    !pending.view.isShown || !pending.view.isAttachedToWindow ||
                     isSuperseded(pending.key, pending.gameId, pending.fen, pending.uci, pending.flipped)
                 ) return@onPlayableBoard
-                if (pendingPromotion.compareAndSet(pending, null)) {
-                    picker.select(pending.controller, pending.uci, pending.flipped)
-                    MainHook.log("autoplay: submitted native promotion ${pending.uci}")
+                val state = picker.readState(pending.controller) ?: return@onPlayableBoard
+                if (bridge.extractFen(state) != pending.fen) return@onPlayableBoard
+                val pawn = picker.selectedPawnId(state, pending.uci) ?: return@onPlayableBoard
+                when (val menu = picker.menu.choice(pending.view, pawn, pending.uci[4])) {
+                    is RivePromotionMenu.Choice.Legacy -> {
+                        // Its own promotion callback clears pendingPromotion.
+                        if (pendingPromotion.get() === pending) {
+                            menu.select()
+                            waiting = true
+                        }
+                    }
+                    is RivePromotionMenu.Choice.DataBound -> {
+                        if (pendingPromotion.compareAndSet(pending, null)) {
+                            picker.select(pending.controller, pending.uci, pending.flipped) { piece ->
+                                if (BridgeAccess.boardController === pending.controller &&
+                                    bridge.gameId == pending.gameId && pending.view.isAttachedToWindow
+                                ) menu.finish(piece)
+                            }
+                            MainHook.log("autoplay: completed native promotion ${pending.uci}")
+                        }
+                    }
+                    null -> waiting = true
                 }
             }
         } catch (e: Exception) {
-            MainHook.log("autoplay: native promotion failed: $e")
+            if (checksLeft == 1) MainHook.log("autoplay: native promotion unavailable: $e")
+            waiting = true
+        }
+        if (waiting && checksLeft > 1 && pendingPromotion.get() === pending) {
+            // The board queues its Rive inputs after the model accepts the
+            // destination. Allow the rendered menu to catch up while it is safe.
+            mainHandler.postDelayed({
+                HookRuntime.runIfActive { selectPromotion(picker, pending, checksLeft - 1) }
+            }, PROMOTION_RENDER_INTERVAL_MS)
         }
     }
 
