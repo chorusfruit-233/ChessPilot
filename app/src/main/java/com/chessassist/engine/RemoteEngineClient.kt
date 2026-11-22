@@ -17,7 +17,7 @@ import org.json.JSONObject
  * Mirrors [StockfishClient]'s stream discipline EXACTLY, because EngineLoop
  * depends on it: at most one reader at a time (analyse XOR ponder),
  * signal/stop calls only ever WRITE, and a hit-path result flows back through
- * the ponder reader thread (signalPonderHit itself reads nothing — two
+ * the ponder reader thread (the finalization request itself reads nothing — two
  * concurrent readers on one socket was the original ponder saga; never again).
  *
  * Think shape (movetime/depth) rides in each request and the server honors
@@ -36,7 +36,6 @@ class RemoteEngineClient : EngineClient {
         private const val CONNECT_TIMEOUT_MS = 3000
         private const val ANALYSE_GRACE_MS = 12_000L
         private const val MAX_CONSEC_TIMEOUTS = 2
-        private const val PONDER_MAX_MS = 180_000L
         private const val PONDER_POLL_MS = 200
         private const val PONDER_REPLY_MS = 4000L
     }
@@ -274,26 +273,23 @@ class RemoteEngineClient : EngineClient {
         }
         // Older servers ignore "bounded". Finalizing over the existing
         // protocol enforces the budget there and also retrieves the final PV.
-        val budget = if (depth > 0) PONDER_MAX_MS else movetimeMs
+        val budget = if (depth > 0) PonderSession.SEARCH_TIMEOUT_MS else movetimeMs
         val limitAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budget)
         try {
             while (!stopFlag.get() && isRunning() && System.nanoTime() < ponderReplyDeadline) {
-                if (System.nanoTime() >= limitAt) signalPonderHit()
+                if (System.nanoTime() >= limitAt) finishPonder()
                 val line = nextLine() ?: continue
                 val o = try {
                     JSONObject(line)
                 } catch (_: Throwable) {
                     continue
                 }
-                // Hit path: the worker's signalPonderHit made the server
-                // answer; the reply flows back through THIS reader (same as
-                // the local client) so the ponder thread exits WITH it.
                 // Stale lines (late answers to older ids) are skipped like analyse.
                 if (o.optString("t") == "ponder_info") {
                     if (o.optInt("id", -1) != id) continue
                     val best = resultOf(o) ?: continue
                     onUpdate(best)
-                    if (depth > 0 && best.depth >= depth) signalPonderHit()
+                    if (depth > 0 && best.depth >= depth) finishPonder()
                 } else if (o.optString("t") == "result") {
                     if (o.has("id") && o.optInt("id", id) != id) continue
                     synchronized(writeLock) { ponderActive = false }
@@ -312,11 +308,8 @@ class RemoteEngineClient : EngineClient {
         return null
     }
 
-    /**
-     * Write-only (the reply flows to the ponder reader thread — see class
-     * doc). Never blocks the worker.
-     */
-    override fun signalPonderHit() {
+    /** Retrieve the final reply after the search reaches its limit. */
+    private fun finishPonder() {
         synchronized(writeLock) {
             if (!ponderActive || ponderReplyDeadline != Long.MAX_VALUE) return
             ponderReplyDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PONDER_REPLY_MS)

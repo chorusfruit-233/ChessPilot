@@ -48,9 +48,8 @@ class PonderAutoplayTest {
             .apply { isAccessible = true }.newInstance()
         set(EngineLoop, "pending", initialPosition)
         set(EngineLoop, "analysingClient", null)
-        val session = PonderSession(source, "e7e5", history)
-        session.thread = Thread {} // Completed ponder still owns a prepared PV.
-        session.update(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
+        val session = PonderSession(source, "e7e5", history, startedAtNanos = System.nanoTime() - 1_000_000_000L)
+        session.complete(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
         set(EngineLoop, "ponderSession", session)
         synchronized(get<Any>(BridgeServer, "sendLock")) {
             get<ArrayDeque<JSONObject>>(BridgeServer, "pendingQueue").clear()
@@ -494,9 +493,8 @@ class PonderAutoplayTest {
     }
 
     @Test fun completingTheSourceHistoryKeepsTheExistingPreparedSession() {
-        val session = PonderSession(source, "e7e5", emptyList())
-        session.thread = Thread {}
-        session.update(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
+        val session = PonderSession(source, "e7e5", emptyList(), startedAtNanos = System.nanoTime() - 1_000_000_000L)
+        session.complete(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
         set(EngineLoop, "ponderSession", session)
         EngineLoop.onPosition(source, "w", "b", emptyList())
         startWorker()
@@ -514,6 +512,7 @@ class PonderAutoplayTest {
         BridgeSettings.ponderLimits = timeLimits
         set(EngineLoop, "ponderSession", null)
         val cancelled = CountDownLatch(1)
+        ponder.finalPonderReply = BestMove("g1f3", null, 25, 12, positionFen = target)
         ponder.onPonder = { flag, update ->
             update(BestMove("g1f3", null, 25, 6, positionFen = target))
             if (ponder.ponders.get() == 1) {
@@ -546,18 +545,19 @@ class PonderAutoplayTest {
     @Test fun correctedFenDuringFinalizationKeepsThePreparedReplyForTheNextTick() {
         val release = CountDownLatch(1)
         val session = PonderSession(source, "e7e5", history)
-        val waiting = Thread { check(release.await(3, TimeUnit.SECONDS)) }.apply { start() }
+        val waiting = Thread {
+            check(release.await(3, TimeUnit.SECONDS))
+            session.complete(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
+        }.apply { start() }
         session.thread = waiting
         set(EngineLoop, "ponderSession", session)
         val corrected = target.replace(" - 0 2", " e6 0 2")
-        ponder.onHit = {
-            session.update(BestMove("g1f3", "b8c6", 25, 18, positionFen = target))
-            EngineLoop.onPosition(corrected, "w", "w", history + "e7e5")
-            release.countDown()
-        }
         try {
             EngineLoop.onPosition(target, "w", "w", history + "e7e5")
             startWorker()
+            Thread.sleep(450)
+            EngineLoop.onPosition(corrected, "w", "w", history + "e7e5")
+            release.countDown()
             assertPreparedAutoplay(waitForCommand(), corrected)
         } finally {
             release.countDown()
@@ -578,24 +578,45 @@ class PonderAutoplayTest {
         assertEquals("e2e4 e7e5", corrected.getString("moves"))
     }
 
-    @Test fun correctionWhileStoppingAPreparedReaderDoesNotPublishTheOldFenOrResearch() {
+    @Test fun anEarlyDepthHitWaitsForTheSameSearchWithoutPlayingAnInterimMove() {
+        val limits = PonderLimits(700, 20)
+        BridgeSettings.ponderLimits = limits
         val release = CountDownLatch(1)
-        val session = get<PonderSession>(EngineLoop, "ponderSession")
-        val reader = Thread { check(release.await(5, TimeUnit.SECONDS)) }.apply { start() }
-        session.thread = reader
-        val corrected = target.replace(" - 0 2", " e6 0 2")
-        ponder.onStop = {
-            EngineLoop.onPosition(corrected, "w", "w", history + "e7e5")
-            release.countDown()
+        val session = PonderSession(source, "e7e5", history, limits)
+        session.update(BestMove("b1c3", null, 25, 8, positionFen = target))
+        val reader = Thread {
+            check(release.await(5, TimeUnit.SECONDS))
+            session.complete(BestMove("g1f3", null, 25, 20, positionFen = target))
         }
+        set(EngineLoop, "ponderSession", session)
+        session.thread = reader
+        reader.start()
         try {
             EngineLoop.onPosition(target, "w", "w", history + "e7e5")
             startWorker()
-            assertPreparedAutoplay(waitForCommand(), corrected)
+            Thread.sleep(550)
+            assertTrue(commands().none { it.optString("t") == "bestmove" })
+            assertFalse("Early hit stopped the existing search", session.stopFlag.get())
+            assertEquals(0, main.analyses.get())
+            release.countDown()
+            assertPreparedAutoplay(waitForCommand())
         } finally {
             release.countDown()
             reader.join(2000)
         }
+    }
+
+    @Test fun timeModeWaitsForTheConfiguredBudgetWhenTheEngineReturnsEarly() {
+        val limits = PonderLimits(950, 0)
+        BridgeSettings.ponderLimits = limits
+        val started = System.nanoTime()
+        val session = PonderSession(source, "e7e5", history, limits, started)
+        session.complete(BestMove("g1f3", null, 25, 10, positionFen = target))
+        set(EngineLoop, "ponderSession", session)
+        EngineLoop.onPosition(target, "w", "w", history + "e7e5")
+        startWorker()
+        assertPreparedAutoplay(waitForCommand())
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= limits.movetimeMs)
     }
 
     // Layout read from the mapped Duolingo classes by StateBridge.
@@ -616,7 +637,7 @@ class PonderAutoplayTest {
         val analyses = AtomicInteger()
         val ponders = AtomicInteger()
         val ponderRequests = LinkedBlockingQueue<PonderLimits>()
-        var onHit: (() -> Unit)? = null
+        var finalPonderReply: BestMove? = null
         var onStop: (() -> Unit)? = null
         var onAnalyse: (() -> Unit)? = null
         var onStopEngine: (() -> Unit)? = null
@@ -636,9 +657,8 @@ class PonderAutoplayTest {
             ponders.incrementAndGet()
             ponderRequests.add(PonderLimits(movetimeMs, depth))
             onPonder?.invoke(stopFlag, onUpdate)
-            return null
+            return finalPonderReply.takeUnless { stopFlag.get() }
         }
-        override fun signalPonderHit() { onHit?.invoke() }
         override fun stopPonder() { onStop?.invoke() }
         override val loadedNnue = "fake"
         override val lastThreads = 1

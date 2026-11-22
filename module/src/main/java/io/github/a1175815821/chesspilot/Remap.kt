@@ -47,14 +47,20 @@ class Remap private constructor(map: JSONObject) {
     internal fun promotionPicker(loader: ClassLoader): PromotionPicker? {
         val profile = promotion ?: return null
         fun method(key: String) = DexMethod(profile.getString(key)).resolve(loader)
+        fun field(key: String) = DexField(profile.getString(key)).resolve(loader)
+        val indices = if (profile.has("dbPieceIndices")) field("dbPieceIndices").get(null) as? Map<*, *> else null
         return PromotionPicker(
             preview = method("preview"),
             choose = method("choose"),
             reset = method("reset"),
             parseMove = method("parseMove"),
-            selectedMoves = DexField(profile.getString("selectedMoves")).resolve(loader),
+            selectedMoves = field("selectedMoves"),
             moveUci = method(loader, "moveUci"),
             liveState = method(loader, "liveState"),
+            moveFrom = field("moveFrom"),
+            pieceAt = method("pieceAt"),
+            pieceId = field("pieceId"),
+            menu = RivePromotionMenu(indices),
             pieceType = Reflect.findClass(DexRemapper.PIECE_TYPE, loader),
         )
     }

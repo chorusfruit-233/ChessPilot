@@ -58,7 +58,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
         discoverResults(controller.name, fen.name, opening.descriptor)
         val mapping = JSONObject().put("classes", JSONObject(classes)).put("methods", JSONObject(methods))
             .put("fields", JSONObject(fields))
-        discoverPromotion(controller, state, move)?.let { mapping.put("promotion", it) }
+        discoverPromotion(controller, state, move, square)?.let { mapping.put("promotion", it) }
         return mapping
     }
 
@@ -85,7 +85,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
     }
 
     /** An unmatched picker leaves the rest of the board adapter available. */
-    private fun discoverPromotion(controller: ClassData, state: ClassData, move: ClassData): JSONObject? {
+    private fun discoverPromotion(controller: ClassData, state: ClassData, move: ClassData, square: ClassData): JSONObject? {
         val choose = controller.methods.singleOrNull { method ->
             method.matches("void", INTEGER, INTEGER, INTEGER) &&
                 method.invokes.any { it.className == PIECE_TYPE && it.name == "getRiveValue" } &&
@@ -110,12 +110,33 @@ internal class DexRemapper(private val dex: DexKitBridge) {
             }
         } ?: return null
         val parse = state.methods.singleOrNull { it.matches(move.name, STRING) } ?: return null
-        return JSONObject()
+        val from = move.fields.singleOrNull { it.name == "a" && it.typeName == square.name } ?: return null
+        val pieceAt = state.methods.singleOrNull { method ->
+            method.isMethod && !Modifier.isStatic(method.modifiers) && method.paramTypeNames == listOf(square.name) &&
+                method.returnType?.methods?.any { it.name == "toString" && "ChessPiece(id=" in it.usingStrings } == true
+        } ?: return null
+        val pieceId = pieceAt.returnType?.fields?.singleOrNull {
+            it.typeName == STRING && !Modifier.isStatic(it.modifiers)
+        } ?: return null
+        val dbRenderer = dex.findMethod {
+            matcher { usingStrings("pieces", "promotion_box_db_trig") }
+        }.singleOrNull()
+        val dbIndices = dbRenderer?.let { renderer ->
+            renderer.usingFields.map { it.field }.distinctBy { it.descriptor }.singleOrNull {
+                it.className == renderer.className && it.typeName == "java.util.Map" && Modifier.isStatic(it.modifiers)
+            }
+        }
+        val mapping = JSONObject()
             .put("preview", preview.descriptor)
             .put("choose", choose.descriptor)
             .put("reset", reset.descriptor)
             .put("parseMove", parse.descriptor)
             .put("selectedMoves", moves.descriptor)
+            .put("moveFrom", from.descriptor)
+            .put("pieceAt", pieceAt.descriptor)
+            .put("pieceId", pieceId.descriptor)
+        dbIndices?.let { mapping.put("dbPieceIndices", it.descriptor) }
+        return mapping
     }
 
     private fun discoverResults(controller: String, fen: String, setup: String) {

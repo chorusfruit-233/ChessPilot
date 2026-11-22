@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PonderSessionTest {
+    @Test fun completedReplyBelowTheRequestedDepthCannotBePlayed() {
+        val job = PonderSession(source, "e7e5", listOf("e2e4"), com.chessassist.PonderLimits(700, 20))
+        job.complete(BestMove("g1f3", null, 20, 19))
+        assertNull(job.readyResult())
+        job.complete(BestMove("g1f3", null, 20, 20))
+        assertEquals(20, job.readyResult()?.depth)
+    }
+
     private val source = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
     private val target = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
     private fun session() = PonderSession(source, "e7e5", listOf("e2e4"))
