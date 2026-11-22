@@ -2,6 +2,7 @@ package com.chessassist.engine
 
 import com.chessassist.BridgeServer
 import com.chessassist.BridgeSettings
+import com.chessassist.PonderLimits
 import io.github.a1175815821.chesspilot.BridgeClient
 import io.github.a1175815821.chesspilot.BridgePublisher
 import io.github.a1175815821.chesspilot.GameEnd
@@ -9,6 +10,7 @@ import io.github.a1175815821.chesspilot.StateBridge
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.junit.After
@@ -34,6 +36,7 @@ class PonderAutoplayTest {
         EngineLoop.stop()
         BridgeSettings.autoPlayEnabled = true
         BridgeSettings.ponderEnabled = true
+        BridgeSettings.ponderLimits = PonderLimits()
         BridgeSettings.backend = BridgeSettings.BACKEND_LOCAL
         set(EngineLoop, "client", main)
         set(EngineLoop, "ponderClient", ponder)
@@ -61,6 +64,7 @@ class PonderAutoplayTest {
         assertFalse("Engine worker leaked", worker?.isAlive == true)
         BridgeSettings.autoPlayEnabled = false
         BridgeSettings.ponderEnabled = false
+        BridgeSettings.ponderLimits = PonderLimits()
     }
 
     private fun startWorker() {
@@ -319,6 +323,52 @@ class PonderAutoplayTest {
         assertNull(EngineLoop.snapshot().gameStatus)
     }
 
+    @Test fun committedCheckmateStopsBotAutoplayBeforeTheMatchResultArrives() {
+        val controller = Any()
+        val setup = NativeSetup(target, emptyList(), true)
+        val live = NativeState(NativeFen(target), setup, NativeColor.WHITE, NativeColor.WHITE, emptyList())
+        val mateFen = "7k/6Q1/6K1/8/8/8/8/8 b - - 1 32"
+        val mate = NativeState(NativeFen(mateFen), setup, NativeColor.WHITE, NativeColor.BLACK, listOf(NativeMove("g6g7")))
+        val board = StateBridge(checkmatedKing = { if (it === mate) NativeColor.BLACK else null })
+        board.onPlayerColor(controller, NativeColor.WHITE)
+        board.onBoardSetup(controller, model = setup, liveState = live)
+        deliver(get(BridgeClient, "lastSnapshot"))
+        startWorker()
+        assertEquals(board.gameId, waitForCommand().getString("game"))
+
+        // Creation of a tentative terminal state is not itself a game result.
+        board.onGameState(mate)
+        assertTrue(board.canPlay(board.gameId, mateFen))
+        assertFalse(board.onRenderedState(controller, mate))
+        assertNull(board.tapOrientation(board.gameId, target))
+        val result = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals("CHECKMATE", result.getString("end"))
+        assertEquals("WIN", result.getString("outcome"))
+        assertEquals(mateFen, result.getString("fen"))
+        deliver(result)
+
+        board.onBoardSetup(controller, model = setup, liveState = live)
+        assertFalse(board.canPlay(board.gameId, target))
+        assertEquals("胜利 · 将死", EngineLoop.snapshot().gameResult)
+        EngineLoop.playPendingBestmove()
+        assertTrue(commands().none { it.optString("t") in listOf("bestmove", "play", "ponder") })
+    }
+
+    @Test fun checkmatedPlayerCannotTapOnTheirTerminalTurn() {
+        val mateFen = "7k/6Q1/6K1/8/8/8/8/8 b - - 1 32"
+        val board = StateBridge(checkmatedKing = { NativeColor.BLACK })
+        val owner = Any()
+        val setup = NativeSetup(mateFen, emptyList(), true)
+        board.onPlayerColor(owner, NativeColor.BLACK)
+        board.onBoardSetup(owner, liveState = NativeState(
+            NativeFen(mateFen), setup, NativeColor.WHITE, NativeColor.BLACK, emptyList(),
+        ))
+        val result = get<JSONObject>(BridgeClient, "lastSnapshot")
+        assertEquals("CHECKMATE", result.getString("end"))
+        assertEquals("LOSS", result.getString("outcome"))
+        assertNull(board.tapOrientation(board.gameId, mateFen))
+    }
+
     @Test fun endingDuringPonderClearsItsCacheAndFutureGuesses() {
         EngineLoop.onPosition(source, "w", "b", history, "ponder-game")
         ponder.start()
@@ -459,6 +509,40 @@ class PonderAutoplayTest {
         assertEquals(0, ponder.ponders.get())
     }
 
+    @Test fun ponderUsesIndependentLimitsAndReplacesItsSearchAfterAChange() {
+        val timeLimits = PonderLimits(2300, 0)
+        BridgeSettings.ponderLimits = timeLimits
+        set(EngineLoop, "ponderSession", null)
+        val cancelled = CountDownLatch(1)
+        ponder.onPonder = { flag, update ->
+            update(BestMove("g1f3", null, 25, 6, positionFen = target))
+            if (ponder.ponders.get() == 1) {
+                val deadline = System.nanoTime() + 3_000_000_000L
+                while (!flag.get() && System.nanoTime() < deadline) Thread.sleep(5)
+                if (flag.get()) cancelled.countDown()
+            }
+        }
+        EngineLoop.onPosition(source, "w", "b", history)
+        startWorker()
+        assertEquals(timeLimits, ponder.ponderRequests.poll(3, TimeUnit.SECONDS))
+        val depthLimits = PonderLimits(2300, 12)
+        BridgeSettings.ponderLimits = depthLimits
+        assertTrue(cancelled.await(2, TimeUnit.SECONDS))
+        assertEquals(depthLimits, ponder.ponderRequests.poll(2, TimeUnit.SECONDS))
+        assertNull("Completed search restarted on the same board", ponder.ponderRequests.poll(600, TimeUnit.MILLISECONDS))
+        assertEquals(0, main.analyses.get())
+        EngineLoop.onPosition(target, "w", "w", history + "e7e5")
+        assertPreparedAutoplay(waitForCommand())
+    }
+
+    @Test fun changedLimitsInvalidateAnAlreadyPreparedHit() {
+        BridgeSettings.ponderLimits = PonderLimits(1200, 10)
+        EngineLoop.onPosition(target, "w", "w", history + "e7e5")
+        startWorker()
+        assertEquals("search", waitForCommand().getString("source"))
+        assertEquals(1, main.analyses.get())
+    }
+
     @Test fun correctedFenDuringFinalizationKeepsThePreparedReplyForTheNextTick() {
         val release = CountDownLatch(1)
         val session = PonderSession(source, "e7e5", history)
@@ -531,6 +615,7 @@ class PonderAutoplayTest {
     private class FakeEngine : EngineClient {
         val analyses = AtomicInteger()
         val ponders = AtomicInteger()
+        val ponderRequests = LinkedBlockingQueue<PonderLimits>()
         var onHit: (() -> Unit)? = null
         var onStop: (() -> Unit)? = null
         var onAnalyse: (() -> Unit)? = null
@@ -549,6 +634,7 @@ class PonderAutoplayTest {
         override fun ponder(fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
                             stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit): BestMove? {
             ponders.incrementAndGet()
+            ponderRequests.add(PonderLimits(movetimeMs, depth))
             onPonder?.invoke(stopFlag, onUpdate)
             return null
         }

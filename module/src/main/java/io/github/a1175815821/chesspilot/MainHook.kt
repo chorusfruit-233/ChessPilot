@@ -67,7 +67,15 @@ class MainHook : XposedModule() {
         try {
             val table = Remap.forApk(context.applicationInfo.sourceDir, moduleApplicationInfo.nativeLibraryDir)
             table.verify(loader)
-            val stateBridge = StateBridge(table.methodName("fullFen"), table.methodName("moveUci"))
+            val kingState = table.method(loader, "kingState")
+            val kingColor = table.field(loader, "kingColor")
+            val specialState = table.field(loader, "kingSpecialState")
+            val stateBridge = StateBridge(table.methodName("fullFen"), table.methodName("moveUci")) { state ->
+                val king = kingState.invoke(state)
+                if (king != null && (specialState.get(king) as? Enum<*>)?.name == "CHECKMATE") {
+                    kingColor.get(king)
+                } else null
+            }
             val arrowPainter = ArrowPainter(table)
             hookModels(loader, table, stateBridge, arrowPainter)
             hookController(loader, table, stateBridge, arrowPainter)
@@ -116,11 +124,20 @@ class MainHook : XposedModule() {
             field.get(session)?.let { stateBridge.onPlayerColor(owner, it) }
         }
         val liveGetter = table.method(loader, "liveState")
+        val useCase = table.field(loader, "boardUseCase")
+        fun receiveLiveState(owner: Any, state: Any) {
+            if (stateBridge.onRenderedState(owner, state)) arrows.onRenderedState(state)
+        }
         HookRuntime.after(liveGetter, "render") { chain, result ->
             val owner = chain.thisObject
-            if (owner != null && result != null && stateBridge.onRenderedState(owner, result)) {
-                arrows.onRenderedState(result)
-            }
+            if (owner != null && result != null) receiveLiveState(owner, result)
+        }
+        HookRuntime.after(table.method(loader, "commitBoardState"), "board-state-committed") { chain, _ ->
+            // The state constructor also runs for tentative positions. Read the
+            // actual board after the move transaction commits.
+            val owner = BridgeAccess.boardController ?: return@after
+            if (useCase.get(owner) !== chain.thisObject) return@after
+            readLiveState(owner, liveGetter)?.let { receiveLiveState(owner, it) }
         }
         fun setupBoard(controller: Any, model: Any? = null, miniMatchId: String? = null) {
             val state = readLiveState(controller, liveGetter)

@@ -303,8 +303,9 @@ object EngineLoop {
             pushPonderGuessOrClear(position, fen, r)
             // A finished result is still useful. Do not restart and erase it
             // every 200 ms while the opponent is deciding.
+            val limits = BridgeSettings.ponderLimits
             val existing = ponderSession
-            if (existing?.canKeep(fen, r) == true) {
+            if (existing?.canKeep(fen, r, limits) == true) {
                 existing.updateSourceHistory(fen, moves)
                 return
             }
@@ -319,15 +320,11 @@ object EngineLoop {
                 pc = createPonderClient(gen) ?: return
             }
             val c = pc
-            val session = PonderSession(fen, r, moves)
-            val movetime = if (c is RemoteEngineClient) BridgeSettings.remoteMovetimeMs
-                else BridgeSettings.movetimeMs
-            val depth = if (c is RemoteEngineClient) BridgeSettings.remoteDepth
-                else BridgeSettings.searchDepth
-            Log.i(TAG, "ponder start (opp to move, our reply to $r)")
+            val session = PonderSession(fen, r, moves, limits)
+            Log.i(TAG, "ponder start (our reply to $r, ${limits.label()})")
             session.thread = Thread({
                 try {
-                    val res = c.ponder(fen, r, movetime, depth, session.stopFlag, session::update)
+                    val res = c.ponder(fen, r, limits.movetimeMs, limits.depth, session.stopFlag, session::update)
                     if (res != null) {
                         session.update(res)
                         Log.i(TAG, "ponder finished: ${res.uci} (depth ${res.depth})")
@@ -339,7 +336,9 @@ object EngineLoop {
                 }
             }, "ponder").apply { isDaemon = true }
             val started = synchronized(pendingLock) {
-                if (!running.get() || gen != workerGen || pending.gameId != position.gameId || pending.end != null) {
+                if (!running.get() || gen != workerGen || pending.gameId != position.gameId || pending.end != null ||
+                    !BridgeSettings.ponderEnabled || BridgeSettings.ponderLimits != limits
+                ) {
                     false
                 } else {
                     // Our turn may have arrived during the handshake. Starting the
@@ -371,7 +370,7 @@ object EngineLoop {
             val session = ponderSession ?: return null
             val t = session.thread ?: return null
             val r = session.prediction
-            if (!BridgeSettings.ponderEnabled) {
+            if (!BridgeSettings.ponderEnabled || session.limits != BridgeSettings.ponderLimits) {
                 ensurePonderStopped()
                 return null
             }
@@ -413,6 +412,7 @@ object EngineLoop {
                 return null
             }
             ensurePonderStopped()
+            if (!BridgeSettings.ponderEnabled || session.limits != BridgeSettings.ponderLimits) return null
             if (res == null) {
                 // Silence past budget+grace means the engine is genuinely
                 // wedged — never trust it for the fallback search: drop it so
@@ -806,13 +806,14 @@ object EngineLoop {
     fun ponderLine(): String {
         if (!BridgeSettings.ponderEnabled) return "关"
         if (pending.end != null) return "本局已停止"
-        val session = ponderSession
+        val limits = BridgeSettings.ponderLimits
+        val session = ponderSession?.takeIf { it.limits == limits }
         val best = session?.result
         val hit = lastPonderHit
         return when {
             session != null && best != null -> "预测 ${session.prediction} → 应招 ${best.uci} · 深度${best.depth}" +
                 if (session.thread?.isAlive == true) "（已备好，继续深算）" else "（已备好）"
-            session?.thread?.isAlive == true -> "预测 ${session.prediction} · 预计算应招中…"
+            session?.thread?.isAlive == true -> "预测 ${session.prediction} · 预计算中 · ${limits.label()}"
             hit != null -> hit
             ponderClient?.isRunning() == true -> "待机（引擎在线）"
             else -> "开·引擎未启动"

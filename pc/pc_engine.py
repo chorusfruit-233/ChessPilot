@@ -14,8 +14,8 @@ Protocol (UTF-8 JSON, one object per line, phone -> this server):
       remote sliders); --movetime/--depth below are defaults for clients that
       omit them. Threads/hash stay server-side (need a process restart).
   {"t":"ponder","id":N,"fen":"...","ponderMove":"e7e5",
-   "movetimeMs":M,"depth":D}
-      -> starts `go ponder [movetime M | depth D]` and streams completed PVs:
+   "movetimeMs":M,"depth":D,"bounded":true}
+      -> searches the predicted position and streams completed PVs:
          {"t":"ponder_info","id":N,"uci":"g1f3","ponder":"b8c6",
           "scoreCp":25,"depth":18,"isMate":false,"fen":"<predicted position>"}.
       The phone can reuse this prepared reply when the prediction is confirmed.
@@ -396,7 +396,7 @@ class Engine:
                 f"score={res['scoreCp']} ({dt:.2f}s)")
             return res
 
-    def ponder(self, req_id, fen, ponder_move, movetime_ms=0, depth=0, on_update=None):
+    def ponder(self, req_id, fen, ponder_move, movetime_ms=0, depth=0, on_update=None, bounded=False):
         with self.lock:
             if not self._sane_fen(fen):
                 return {"t": "error", "id": req_id,
@@ -410,7 +410,9 @@ class Engine:
             # finalizes the current work with stop, without another time budget.
             use_d = depth if depth > 0 else self.depth
             use_mt = movetime_ms if movetime_ms > 0 else self.movetime_ms
-            if use_d > 0:
+            if bounded:
+                go = self._go_cmd(use_mt, depth)
+            elif use_d > 0:
                 go = f"go ponder depth {use_d}"
             elif use_mt > 0:
                 go = f"go ponder movetime {use_mt}"
@@ -573,7 +575,7 @@ def handle_conn(conn, addr, engine):
                                         o.get("ponderMove", ""),
                                         o.get("movetimeMs", 0) or 0,
                                         o.get("depth", 0) or 0,
-                                        on_update=respond)
+                                        on_update=respond, bounded=o.get("bounded") is True)
                     if res is None:
                         continue  # ponder runs; answer comes via ponderhit
                 elif t == "ponderhit":
