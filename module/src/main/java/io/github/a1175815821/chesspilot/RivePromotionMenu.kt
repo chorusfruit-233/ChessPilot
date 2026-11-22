@@ -21,7 +21,7 @@ internal class RivePromotionMenu(private val dbPieceIndices: Map<*, *>?) {
         val trigger = "promote_trigger_$suffix"
         val strings = arrayOf(String::class.java, String::class.java)
         val input = artboard.javaClass.getMethod("input", *strings).invoke(artboard, trigger, pawnId)
-        if (input == null || input.javaClass.getMethod("fire").returnType != Void.TYPE) return null
+        if (input?.javaClass?.name != "app.rive.runtime.kotlin.core.SMITrigger") return null
         // This nested input follows the same Rive transition and promoted_event
         // as the corresponding menu button, including the closing animation.
         val fire = view.javaClass.getMethod("fireStateAtPath", *strings)
