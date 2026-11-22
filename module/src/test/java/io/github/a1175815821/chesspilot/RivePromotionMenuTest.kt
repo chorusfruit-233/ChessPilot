@@ -1,5 +1,6 @@
 package io.github.a1175815821.chesspilot
 
+import app.rive.runtime.kotlin.core.SMITrigger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -8,7 +9,6 @@ class RivePromotionMenuTest {
     class Switch(var value: Boolean = false)
     class Trigger {
         var count = 0
-        fun fire() { count++ }
         fun trigger() { count++ }
     }
     class NumberProperty(var value: Any = 0f)
@@ -36,7 +36,7 @@ class RivePromotionMenuTest {
     }
 
     class Artboard(val viewModelInstance: Bindings?) {
-        fun input(name: String, path: String) = Trigger().takeIf { name == "promote_trigger_n" && path == "W_P_2" }
+        fun input(name: String, path: String) = SMITrigger().takeIf { name == "promote_trigger_n" && path == "W_P_2" }
     }
 
     class Controller(val activeArtboard: Artboard)
