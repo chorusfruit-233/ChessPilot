@@ -13,6 +13,7 @@ the hooks. The control screen reports the installed version and any failure.
 |---|---|---|
 | Board setup and live state | `mz6.O(nx5)` and `mz6.J()` | `qe7.P(ca6)` and `qe7.J()` |
 | Full FEN and UCI move | `dm5.b()` and `gf6.b()` | `xx5.c()` and `kt6.d()` |
+| Committed board state and king status | `qx5.o(o2i)` and `ox5.f()` | `a82.r(k1i)` and `da6.h()` |
 | PvP result | `tr6.G(ar6, pq8)` | `o67.G(t57, l89)` |
 | Assigned color | Bot `j.e0`, PvP `tr6.L` | Bot `j.d0`, PvP `o67.L` |
 | Mini match start and result | `k25.j(bd6)` and `k25.m(…)` | `bd5.j(zq6)` and `bd5.m(…)` |
@@ -27,6 +28,11 @@ name, uncompressed size and CRC32 for each entry.
 The session controller getter associates the assigned color with its live board.
 The bridge sends that assignment to the engine for turn checks. Rive uses the
 live chess state's view orientation to convert squares to touch coordinates.
+
+After the current controller's game use case commits a state, ChessPilot reads
+the live board and checks `KingColorAndSpecialState` once per FEN. A `CHECKMATE`
+for the side to move ends the game and cancels queued taps before the bot match's
+result callback arrives. Tap dispatch also checks the current live FEN.
 
 The promotion profile is optional. DexKit identifies the choice callback via
 `ChessPieceType.getRiveValue()` and `ChessHaptic.PROMOTED_PAWN`, the preview via

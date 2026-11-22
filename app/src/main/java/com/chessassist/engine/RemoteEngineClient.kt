@@ -7,6 +7,7 @@ import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
@@ -37,6 +38,7 @@ class RemoteEngineClient : EngineClient {
         private const val MAX_CONSEC_TIMEOUTS = 2
         private const val PONDER_MAX_MS = 180_000L
         private const val PONDER_POLL_MS = 200
+        private const val PONDER_REPLY_MS = 4000L
     }
 
     @Volatile private var sock: Socket? = null
@@ -45,6 +47,8 @@ class RemoteEngineClient : EngineClient {
     private val dead = AtomicBoolean(false)
     private var reqId = 0
     private var consecTimeouts = 0
+    private var ponderActive = false // guarded by writeLock
+    @Volatile private var ponderReplyDeadline = Long.MAX_VALUE
 
     @Volatile override var loadedNnue: String? = null
         private set
@@ -247,31 +251,34 @@ class RemoteEngineClient : EngineClient {
         stopFlag: AtomicBoolean, onUpdate: (BestMove) -> Unit,
     ): BestMove? {
         if (!isRunning()) return null
-        val id = ++reqId
-        try {
-            send(JSONObject().apply {
-                put("t", "ponder")
-                put("id", id)
-                put("fen", fen)
-                put("ponderMove", ponderMove)
-                // Think shape rides along like analyse (server honors it);
-                // fixed-depth ponder without this ran on server defaults.
-                put("movetimeMs", movetimeMs)
-                put("depth", depth)
-            })
+        val id = try {
+            synchronized(writeLock) {
+                if (stopFlag.get()) return null
+                val request = ++reqId
+                send(JSONObject().apply {
+                    put("t", "ponder")
+                    put("id", request)
+                    put("fen", fen)
+                    put("ponderMove", ponderMove)
+                    put("movetimeMs", movetimeMs)
+                    put("depth", depth)
+                    put("bounded", true)
+                })
+                ponderActive = true
+                ponderReplyDeadline = Long.MAX_VALUE
+                request
+            }
         } catch (_: Throwable) {
             markDead()
             return null
         }
-        val deadline = System.currentTimeMillis() + PONDER_MAX_MS
+        // Older servers ignore "bounded". Finalizing over the existing
+        // protocol enforces the budget there and also retrieves the final PV.
+        val budget = if (depth > 0) PONDER_MAX_MS else movetimeMs
+        val limitAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budget)
         try {
-            while (System.currentTimeMillis() < deadline) {
-                // Miss path: the owner sets the flag AND sends stop (via
-                // stopPonder); just exit — the result, if any, is discarded.
-                if (stopFlag.get()) {
-                    try { send(JSONObject().apply { put("t", "stop"); put("id", id) }) } catch (_: Throwable) {}
-                    return null
-                }
+            while (!stopFlag.get() && isRunning() && System.nanoTime() < ponderReplyDeadline) {
+                if (System.nanoTime() >= limitAt) signalPonderHit()
                 val line = nextLine() ?: continue
                 val o = try {
                     JSONObject(line)
@@ -284,9 +291,12 @@ class RemoteEngineClient : EngineClient {
                 // Stale lines (late answers to older ids) are skipped like analyse.
                 if (o.optString("t") == "ponder_info") {
                     if (o.optInt("id", -1) != id) continue
-                    resultOf(o)?.let(onUpdate)
+                    val best = resultOf(o) ?: continue
+                    onUpdate(best)
+                    if (depth > 0 && best.depth >= depth) signalPonderHit()
                 } else if (o.optString("t") == "result") {
                     if (o.has("id") && o.optInt("id", id) != id) continue
+                    synchronized(writeLock) { ponderActive = false }
                     return resultOf(o)
                 }
                 if (o.optString("t") == "error") {
@@ -296,8 +306,9 @@ class RemoteEngineClient : EngineClient {
             }
         } catch (_: Throwable) {
             return null // nextLine already marked dead
+        } finally {
+            stopPonder()
         }
-        try { send(JSONObject().apply { put("t", "stop"); put("id", id) }) } catch (_: Throwable) {}
         return null
     }
 
@@ -306,10 +317,18 @@ class RemoteEngineClient : EngineClient {
      * doc). Never blocks the worker.
      */
     override fun signalPonderHit() {
-        try { send(JSONObject().apply { put("t", "ponderhit"); put("id", ++reqId) }) } catch (_: Throwable) {}
+        synchronized(writeLock) {
+            if (!ponderActive || ponderReplyDeadline != Long.MAX_VALUE) return
+            ponderReplyDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PONDER_REPLY_MS)
+            try { send(JSONObject().apply { put("t", "ponderhit"); put("id", ++reqId) }) } catch (_: Throwable) { markDead() }
+        }
     }
 
     override fun stopPonder() {
-        try { send(JSONObject().apply { put("t", "stop"); put("id", ++reqId) }) } catch (_: Throwable) {}
+        synchronized(writeLock) {
+            if (!ponderActive) return
+            ponderActive = false
+            try { send(JSONObject().apply { put("t", "stop"); put("id", ++reqId) }) } catch (_: Throwable) { markDead() }
+        }
     }
 }

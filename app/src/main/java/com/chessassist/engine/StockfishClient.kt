@@ -347,11 +347,9 @@ class StockfishClient(private val context: Context) : EngineClient {
      * (fen + ponderMove) until ponderhit/stop. Shares the UCI stream discipline
      * with analyse(); [stopFlag] is checked on every line so the owner can
      * abort promptly (it then pushes a readyok through to unblock this read).
-     * No watchdog here — lifetime is stop-driven, bounded by PONDER_MAX_MS.
-     *
-     * Stockfish withholds bestmove while pondering and ignores movetime until
-     * the hit. Publish each completed PV now; a hit can use that reply without
-     * waiting for another timed search. stop finalizes any in-flight search.
+     * Search the predicted position on this dedicated engine. A normal UCI
+     * search honors the limits while the opponent is still thinking. Publish
+     * completed PVs so an early hit can use the work already available.
      */
     override fun ponder(
         fen: String, ponderMove: String, movetimeMs: Long, depth: Int,
@@ -387,9 +385,8 @@ class StockfishClient(private val context: Context) : EngineClient {
             return null
         }
         try {
-            if (depth > 0) send("go ponder depth $depth")
-            else if (movetimeMs > 0) send("go ponder movetime $movetimeMs")
-            else send("go ponder")
+            if (depth > 0) send("go depth $depth")
+            else send("go movetime $movetimeMs")
         } catch (_: Throwable) {
             return null
         }

@@ -14,6 +14,7 @@ import java.util.WeakHashMap
 class StateBridge(
     private val fenGetter: String = "b",
     private val moveGetter: String = "b",
+    private val checkmatedKing: (Any) -> Any? = { null },
 ) {
 
     private data class Board(
@@ -32,6 +33,8 @@ class StateBridge(
     private var setup: Any? = null
     private var constructedState: ConstructedState? = null
     private var miniMatchId: String? = null
+    private var lastMateCheckedFen: String? = null
+    private var lastRenderedState: Any? = null
     private val retiredControllers = WeakHashMap<Any, Unit>()
     private val playerColors = WeakHashMap<Any, String>()
 
@@ -68,13 +71,14 @@ class StateBridge(
             CommandLoop.cancelPendingMove()
             BridgePublisher.resetPosition()
         }
+        if (newGame || setup !== boardSetup) lastMateCheckedFen = null
         setup = boardSetup
         if (board.end == null) {
             // The state constructor runs inside native setup, before this hook.
             val state = liveState ?: constructedState?.takeIf {
                 board.fen == null && it.setup === boardSetup
             }?.state
-            if (state != null) onGameState(state, "render")
+            if (state != null) onRenderedState(owner, state)
             if (board.fen == null) {
                 if (boardSetup != null) seedFromSetup(boardSetup)
                 if (newGame || board.fen != null) publishSnapshot()
@@ -163,10 +167,25 @@ class StateBridge(
             lastTurnColor = turn
             lastMoves = moves
             lastUpdateAt = System.currentTimeMillis()
-            publishSnapshot()
+            val end = if (src == "render") checkmate(state, fen, user) else null
+            if (end != null) finishGame(end) else publishSnapshot()
         } catch (t: Throwable) {
             MainHook.log("onGameState failed: $t")
         }
+    }
+
+    private fun checkmate(state: Any, fen: String, user: String?): GameEnd? {
+        if (fen == lastMateCheckedFen) return null
+        lastMateCheckedFen = fen
+        val loser = try {
+            checkmatedKing(state)?.let(::colorSymbol)
+        } catch (e: Exception) {
+            MainHook.log("king state unavailable: $e")
+            null
+        } ?: return null
+        if (loser != fen.split(' ').getOrNull(1)) return null
+        val outcome = user?.let { if (it == loser) "LOSS" else "WIN" }
+        return GameEnd("CHECKMATE", outcome)
     }
 
     /** Flatten fallback state into bootstrap-owned values, never module data classes. */
@@ -250,7 +269,8 @@ class StateBridge(
         // doing full reflection extraction. Throttle the heavy part: states change
         // far slower than frames (ctor path is unthrottled and covers new states).
         val now = System.currentTimeMillis()
-        if (now - lastRenderProcessAt < 200) return@synchronized board.end == null
+        if (state === lastRenderedState && now - lastRenderProcessAt < 200) return@synchronized true
+        lastRenderedState = state
         lastRenderProcessAt = now
         onGameState(state, "render") // re-publish: rendered state is authoritative for the UI
         board.end == null

@@ -1,5 +1,6 @@
 package com.chessassist.engine
 
+import com.chessassist.PonderLimits
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** One prediction and its completed search iterations, isolated from later rounds. */
@@ -7,6 +8,7 @@ internal class PonderSession(
     val fen: String,
     val prediction: String,
     history: List<String>,
+    val limits: PonderLimits = PonderLimits(),
 ) {
     @Volatile private var history = history.toList()
     val stopFlag = AtomicBoolean(false)
@@ -36,9 +38,8 @@ internal class PonderSession(
         }
     }
 
-    fun canKeep(fen: String, prediction: String): Boolean =
-        !cancelled && this.fen == fen && this.prediction == prediction &&
-            (thread?.isAlive == true || result != null)
+    fun canKeep(fen: String, prediction: String, limits: PonderLimits = this.limits): Boolean =
+        !cancelled && this.fen == fen && this.prediction == prediction && this.limits == limits
 
     @Synchronized fun matches(fen: String, moves: List<String>): Boolean {
         if (cancelled) return false

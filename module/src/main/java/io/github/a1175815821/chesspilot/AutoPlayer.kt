@@ -25,6 +25,7 @@ class AutoPlayer internal constructor(
 ) {
 
     private val mainHandler = GenerationHandler(android.os.Looper.getMainLooper())
+    private val liveState = remap.method(loader, "liveState")
 
     private data class PromotionAttempt(
         val key: String, val gameId: String?, val fen: String, val uci: String,
@@ -187,7 +188,7 @@ class AutoPlayer internal constructor(
         gameId: String?, cmdFen: String, key: String,
     ) {
         if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return
-        if (!view.isShown || !view.isAttachedToWindow) {
+        if (!view.isShown || !view.isAttachedToWindow || !onLivePosition(gameId, cmdFen, flipped)) {
             finishFlight(key)
             return
         }
@@ -201,7 +202,7 @@ class AutoPlayer internal constructor(
         mainHandler.postDelayed({
             try {
                 if (isSuperseded(key, gameId, cmdFen, uci, flipped)) return@postDelayed
-                if (!view.isShown || !view.isAttachedToWindow) {
+                if (!view.isShown || !view.isAttachedToWindow || !onLivePosition(gameId, cmdFen, flipped)) {
                     finishFlight(key)
                     return@postDelayed
                 }
@@ -225,6 +226,15 @@ class AutoPlayer internal constructor(
             }
         }, jittered)
         MainHook.log("autoplay performed: $uci (attempt ${attempts.get()}/$MAX_ATTEMPTS, gap ${jittered}ms)")
+    }
+
+    /** A constructor snapshot can precede the host's actual position update. */
+    private fun onLivePosition(gameId: String?, fen: String, flipped: Boolean): Boolean {
+        val owner = BridgeAccess.boardController ?: return false
+        val state = liveState.invoke(owner) ?: return false
+        val orientation = if (flipped) "b" else "w"
+        return bridge.onRenderedState(owner, state) && bridge.extractFen(state) == fen &&
+            bridge.tapOrientation(gameId, fen) == orientation
     }
 
     /** True when this chain is no longer current: superseded, or board moved on. */

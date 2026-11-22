@@ -80,6 +80,8 @@ class MainActivity : Activity() {
     private lateinit var autoRow: Ui.SwitchRow
     private lateinit var berserkRow: Ui.SwitchRow
     private lateinit var ponderRow: Ui.SwitchRow
+    private lateinit var ponderDepthRow: Ui.SliderRow
+    private lateinit var ponderTimeRow: Ui.SliderRow
     private lateinit var advSection: Ui.Section
     private lateinit var timeRow: Ui.SliderRow
     private lateinit var depthRow: Ui.SliderRow
@@ -355,9 +357,17 @@ class MainActivity : Activity() {
             BridgeSettings.save(this@MainActivity)
             // No engine restart: the loop reads the flag live every iteration.
             syncFuncPreview()
+            syncPonderControls()
             try { renderStatus(EngineLoop.snapshot()) } catch (_: Throwable) {}
         }
         funcSection.body.addView(ponderRow.root)
+        val limits = BridgeSettings.ponderLimits
+        ponderDepthRow = Ui.sliderRow(this, "极限思考固定深度", PonderLimits.MAX_DEPTH, limits.depth) { savePonderLimits() }
+        funcSection.body.addView(ponderDepthRow.root)
+        ponderTimeRow = Ui.sliderRow(this, "极限思考时间", PonderLimits.TIME_STEPS - 1,
+            (limits.movetimeMs / PonderLimits.TIME_STEP_MS).toInt() - 1) { savePonderLimits() }
+        funcSection.body.addView(ponderTimeRow.root)
+        syncPonderControls()
         content.addView(funcSection.card, bottomMargin(dp(12)))
 
         // ================= 高级设置（折叠） =================
@@ -661,8 +671,27 @@ class MainActivity : Activity() {
             append(" · ")
             append(if (BridgeSettings.berserk) "狂暴开" else "狂暴关")
             append(" · ")
-            append(if (BridgeSettings.ponderEnabled) "极限开" else "极限关")
+            append(if (BridgeSettings.ponderEnabled) "极限 ${BridgeSettings.ponderLimits.label()}" else "极限关")
         }
+    }
+
+    private fun savePonderLimits() {
+        BridgeSettings.ponderLimits = PonderLimits(
+            (ponderTimeRow.bar.progress + 1) * PonderLimits.TIME_STEP_MS, ponderDepthRow.bar.progress,
+        )
+        BridgeSettings.save(this)
+        syncPonderControls()
+        syncFuncPreview()
+    }
+
+    private fun syncPonderControls() {
+        val limits = BridgeSettings.ponderLimits
+        val visibility = if (BridgeSettings.ponderEnabled) View.VISIBLE else View.GONE
+        ponderDepthRow.root.visibility = visibility
+        ponderTimeRow.root.visibility = visibility
+        ponderDepthRow.setChip(if (limits.depth == 0) "按时间" else "${limits.depth} 层")
+        ponderTimeRow.setChip("${limits.movetimeMs}ms")
+        ponderTimeRow.setEnabledRow(limits.depth == 0)
     }
 
     private fun syncAdvPreview() {
@@ -709,6 +738,9 @@ class MainActivity : Activity() {
         autoRow.captionTv.setTextColor(if (BridgeSettings.autoPlayEnabled) ChessMath.C_MID else Ui.T3)
         berserkRow.switch.isChecked = BridgeSettings.berserk
         ponderRow.switch.isChecked = BridgeSettings.ponderEnabled
+        ponderDepthRow.bar.progress = BridgeSettings.ponderLimits.depth
+        ponderTimeRow.bar.progress = (BridgeSettings.ponderLimits.movetimeMs / PonderLimits.TIME_STEP_MS).toInt() - 1
+        syncPonderControls()
         syncFuncPreview()
         backendSeg.select(
             when (BridgeSettings.backend) {

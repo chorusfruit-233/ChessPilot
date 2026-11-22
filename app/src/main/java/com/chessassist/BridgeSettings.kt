@@ -2,6 +2,16 @@ package com.chessassist
 
 import android.content.Context
 
+data class PonderLimits(val movetimeMs: Long = 700L, val depth: Int = 0) {
+    fun label(): String = if (depth > 0) "深度${depth}层" else "${movetimeMs}ms"
+
+    companion object {
+        const val TIME_STEP_MS = 100L
+        const val TIME_STEPS = 100
+        const val MAX_DEPTH = 40
+    }
+}
+
 /**
  * Runtime settings shared by UI, service and engine loop (same process).
  * Persisted in SharedPreferences so toggles survive restarts/updates.
@@ -13,6 +23,8 @@ object BridgeSettings {
     private const val K_DEPTH = "search_depth"
     private const val K_DELAY = "autoplay_delay_ms"
     private const val K_PONDER = "ponder"
+    private const val K_PONDER_TIME = "ponder_movetime_ms"
+    private const val K_PONDER_DEPTH = "ponder_depth"
     private const val K_BERSERK = "berserk"
     private const val K_BACKEND = "backend"
     private const val K_PCHOST = "pc_host"
@@ -59,6 +71,7 @@ object BridgeSettings {
      * job is live, the overlay shows the prediction, prepared reply and depth.
      */
     @Volatile var ponderEnabled: Boolean = false
+    @Volatile var ponderLimits = PonderLimits()
 
     /**
      * Compute backend: [BACKEND_LOCAL] (phone engine only), [BACKEND_AUTO]
@@ -99,12 +112,22 @@ object BridgeSettings {
             pcPort = p.getInt(K_PCPORT, 41718).coerceIn(1, 65535)
             remoteMovetimeMs = p.getLong(K_RMOVETIME, 3000L).coerceIn(500L, 10000L)
             remoteDepth = p.getInt(K_RDEPTH, 0).coerceIn(0, 40)
+            // Existing installs previously inherited the configured backend's
+            // analysis limits. Use those values to initialize the new controls.
+            val preferRemote = backend != BACKEND_LOCAL && pcHost.isNotEmpty()
+            val time = p.getLong(K_PONDER_TIME, if (preferRemote) remoteMovetimeMs else movetimeMs)
+            val depth = p.getInt(K_PONDER_DEPTH, if (preferRemote) remoteDepth else searchDepth)
+            ponderLimits = PonderLimits(
+                time.coerceIn(PonderLimits.TIME_STEP_MS, PonderLimits.TIME_STEP_MS * PonderLimits.TIME_STEPS),
+                depth.coerceIn(0, PonderLimits.MAX_DEPTH),
+            )
         } catch (_: Throwable) {
         }
     }
 
     fun save(context: Context) {
         try {
+            val limits = ponderLimits
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putBoolean(K_AUTOPLAY, autoPlayEnabled)
                 .putLong(K_MOVETIME, movetimeMs)
@@ -112,6 +135,8 @@ object BridgeSettings {
                 .putLong(K_DELAY, autoPlayDelayMs)
                 .putBoolean(K_BERSERK, berserk)
                 .putBoolean(K_PONDER, ponderEnabled)
+                .putLong(K_PONDER_TIME, limits.movetimeMs)
+                .putInt(K_PONDER_DEPTH, limits.depth)
                 .putString(K_BACKEND, backend)
                 .putString(K_PCHOST, pcHost)
                 .putInt(K_PCPORT, pcPort)
@@ -124,7 +149,7 @@ object BridgeSettings {
 
     fun describe(): String =
         (if (searchDepth > 0) "固定深度 $searchDepth 层" else "思考时间 ${movetimeMs}ms") +
-            if (ponderEnabled) " · 极限思考开" else ""
+            if (ponderEnabled) " · 极限思考 ${ponderLimits.label()}" else ""
 
     fun modeShort(): String = if (berserk) "狂暴" else "普通"
 

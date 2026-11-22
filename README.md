@@ -57,6 +57,8 @@ best-move arrows on the board, optional autoplay — on-device or PC-powered.*
 
 `0.6.6` 支持自动升变。棋盘确认兵的落点后，按引擎招法选择后、车、象或马。
 
+`0.6.7` 在人机棋盘提交将死时取消走棋和搜索。「极限思考」可以独立设置固定深度或思考时间。
+
 状态页怎么读、装完没反应怎么办 → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（含故障排查对照表）。
 
 ## 🧪 适配环境

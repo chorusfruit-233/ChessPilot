@@ -86,6 +86,21 @@ class PonderIntegrationTests(unittest.TestCase):
         self.assertEqual("result", result["t"])
         self.assertEqual(6, result["depth"])
 
+    def test_bounded_time_finishes_while_waiting_even_with_a_server_depth_default(self):
+        self.engine.depth = 40
+        self.assertIsNone(self.engine.ponder(7, SOURCE, "e7e5", 250, 0, bounded=True))
+        self.assertIn("go movetime 250", self.commands)
+        self.assertTrue(self.engine.ponder_event.wait(3), "Search did not stop at its time limit")
+        result = self.engine.ponderhit(8)
+        self.assertEqual(7, result["id"])
+        self.assertEqual(TARGET, result["fen"])
+
+    def test_bounded_depth_finishes_at_the_requested_depth_before_hit(self):
+        self.assertIsNone(self.engine.ponder(7, SOURCE, "e7e5", 250, 6, bounded=True))
+        self.assertIn("go depth 6", self.commands)
+        self.assertTrue(self.engine.ponder_event.wait(3), "Search did not stop at fixed depth")
+        self.assertEqual(6, self.engine.ponderhit(8)["depth"])
+
     def test_engine_restart_keeps_progress_reader_alive(self):
         self.prepare()
         self.engine.restart()

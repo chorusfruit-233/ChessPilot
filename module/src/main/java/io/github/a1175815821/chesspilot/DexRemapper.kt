@@ -49,16 +49,39 @@ internal class DexRemapper(private val dex: DexKitBridge) {
         classes["arrowType"] = ARROW_TYPE
         classes["arrowColor"] = ARROW_COLOR
         remember("drawArrow", listOf(draw))
-        remember("liveState", controller.methods.filter { it.matches(state.name) && "gameUseCase" in it.usingStrings })
+        val live = remember("liveState", controller.methods.filter { it.matches(state.name) && "gameUseCase" in it.usingStrings })
         val opening = remember("setupBoard", controller.methods.filter { it.matches("void", setup.name) })
         remember("clearArrows", controller.methods.filter { method ->
             method.matches("void") && method.usingFields.any { it.field.typeName == reset.name }
         })
+        discoverBoardEnd(controller, state, live)
         discoverResults(controller.name, fen.name, opening.descriptor)
         val mapping = JSONObject().put("classes", JSONObject(classes)).put("methods", JSONObject(methods))
             .put("fields", JSONObject(fields))
         discoverPromotion(controller, state, move)?.let { mapping.put("promotion", it) }
         return mapping
+    }
+
+    private fun discoverBoardEnd(controller: ClassData, state: ClassData, live: MethodData) {
+        val king = markedClass("KingColorAndSpecialState(color=", ", specialState=")
+        rememberField("kingColor", king, COLOR)
+        rememberField("kingSpecialState", king, MODEL + "KingSpecialState")
+        remember("kingState", state.methods.filter { method ->
+            method.matches(king.name) && method.usingFields.any {
+                it.field.className == MODEL + "KingSpecialState" && it.field.name == "CHECKMATE"
+            }
+        })
+        val useCase = live.usingFields.map { it.field }
+            .filter { it.className == controller.name && !Modifier.isStatic(it.modifiers) }
+            .distinctBy { it.descriptor }.unique("live game use case")
+        fields["boardUseCase"] = useCase.descriptor
+        val owner = requireNotNull(useCase.type)
+        remember("commitBoardState", owner.methods.filter { method ->
+            method.isMethod && !Modifier.isStatic(method.modifiers) && method.returnTypeName == "void" &&
+                method.paramTypeNames.size == 1 && method.invokes.any {
+                    it.className == state.name && it.returnTypeName == state.name && Modifier.isStatic(it.modifiers)
+                }
+        })
     }
 
     /** An unmatched picker leaves the rest of the board adapter available. */
@@ -107,7 +130,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
         val session = requireNotNull(bot.superClass) { "live chess session missing" }
         classes["botSession"] = bot.name
         classes["chessSession"] = session.name
-        rememberPlayerColor("botPlayerColor", bot, COLOR)
+        rememberField("botPlayerColor", bot, COLOR)
         remember("botGameEnd", listOf(botFinish))
         remember("botExit", bot.methods.filter { it.matches("void", CLIENT_END) })
         remember("sessionController", session.methods.filter { it.matches(controller) })
@@ -121,7 +144,7 @@ internal class DexRemapper(private val dex: DexKitBridge) {
                 it.paramTypeNames.size == 2 && it.paramTypeNames.first() == pvpPayload.name
         })
         val pvp = requireNotNull(pvpEnd.declaredClass)
-        rememberPlayerColor("pvpPlayerColor", pvp, "${MATCH}network.ChessMatchPlayerColor")
+        rememberField("pvpPlayerColor", pvp, "${MATCH}network.ChessMatchPlayerColor")
         classes["pvpSession"] = pvp.name
 
         val roundEnd = remember("miniGameEnd", dex.findMethod {
@@ -173,8 +196,8 @@ internal class DexRemapper(private val dex: DexKitBridge) {
     private fun remember(role: String, candidates: List<MethodData>): MethodData =
         candidates.unique(role).also { methods[role] = it.descriptor }
 
-    private fun rememberPlayerColor(role: String, session: ClassData, colorType: String) {
-        val field = session.fields.filter { it.typeName == colorType && !Modifier.isStatic(it.modifiers) }
+    private fun rememberField(role: String, owner: ClassData, type: String) {
+        val field = owner.fields.filter { it.typeName == type && !Modifier.isStatic(it.modifiers) }
             .unique(role)
         fields[role] = field.descriptor
     }
